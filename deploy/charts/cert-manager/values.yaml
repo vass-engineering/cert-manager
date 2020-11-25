@@ -24,6 +24,16 @@ global:
     # Override the namespace used to store the ConfigMap for leader election
     namespace: "kube-system"
 
+clusterissuerinfra:
+  mail: "felix.centenera@vass.es"
+  privateKeySecretRef: "letsencryptsecretinfraapps"
+  ingressclass: "eks-tyc-ingress-nginx"
+
+clusterissuerapps:
+  mail: "felix.centenera@vass.es"
+  privateKeySecretRef: "letsencryptapps"
+  ingressclass: "eks-tyc-ingress-nginx-apps"
+  
 installCRDs: false
 
 replicaCount: 1
@@ -165,7 +175,23 @@ prometheus:
 #            operator: In
 #            values:
 #            - master
-affinity: {}
+affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+          - key: lifecycle
+            operator: In
+            values:
+            - EC2Spot
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: intent
+            operator: In
+            values:
+            - apps
 
 # expects input structure as per specification https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.11/#toleration-v1-core
 # for example:
@@ -174,7 +200,11 @@ affinity: {}
 #     operator: Equal
 #     value: master
 #     effect: NoSchedule
-tolerations: []
+tolerations:
+  - key: "spotInstance"
+    operator: "Equal"
+    value: "true"
+    effect: "PreferNoSchedule"
 
 webhook:
   replicaCount: 1
@@ -235,9 +265,29 @@ webhook:
 
   nodeSelector: {}
 
-  affinity: {}
+  affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+            - key: lifecycle
+              operator: In
+              values:
+              - EC2Spot
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+          - matchExpressions:
+            - key: intent
+              operator: In
+              values:
+              - apps
 
-  tolerations: []
+  tolerations:
+    - key: "spotInstance"
+      operator: "Equal"
+      value: "true"
+      effect: "PreferNoSchedule"
 
   # Optional additional labels to add to the Webhook Pods
   podLabels: {}
@@ -322,9 +372,29 @@ cainjector:
 
   nodeSelector: {}
 
-  affinity: {}
+  affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+            - key: lifecycle
+              operator: In
+              values:
+              - EC2Spot
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+          - matchExpressions:
+            - key: intent
+              operator: In
+              values:
+              - apps
 
-  tolerations: []
+  tolerations:
+    - key: "spotInstance"
+      operator: "Equal"
+      value: "true"
+      effect: "PreferNoSchedule"
 
   # Optional additional labels to add to the CA Injector Pods
   podLabels: {}
