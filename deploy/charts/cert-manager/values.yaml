@@ -33,7 +33,7 @@ clusterissuerapps:
   mail: "felix.centenera@vass.es"
   privateKeySecretRef: "letsencryptapps"
   ingressclass: "eks-tyc-ingress-nginx-apps"
-  
+
 installCRDs: false
 
 replicaCount: 1
@@ -365,10 +365,13 @@ cainjector:
   # Optional additional arguments for cainjector
   extraArgs: []
 
-  resources: {}
-    # requests:
-    #   cpu: 10m
-    #   memory: 32Mi
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
 
   nodeSelector: {}
 
