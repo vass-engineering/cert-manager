@@ -82,7 +82,9 @@ serviceAccount:
   # annotations: {}
 
 # Optional additional arguments
-extraArgs: []
+extraArgs:
+  - --dns01-recursive-nameservers-only
+  - --dns01-recursive-nameservers=8.8.8.8:53\,8.8.4.4:53
   # Use this flag to set a namespace that cert-manager will use to store
   # supporting resources required for each ClusterIssuer (default is kube-system)
   # - --cluster-resource-namespace=kube-system
@@ -142,11 +144,12 @@ podLabels: {}
 # cert-manager can access an ingress or DNS TXT records at all times.
 # NOTE: This requires Kubernetes 1.10 or `CustomPodDNS` feature gate enabled for
 # the cluster to work.
-# podDnsPolicy: "None"
-# podDnsConfig:
-#   nameservers:
-#     - "1.1.1.1"
-#     - "8.8.8.8"
+podDnsPolicy: "None"
+podDnsConfig:
+  nameservers:
+#    - "1.1.1.1"
+    - "8.8.8.8"
+    - "8.8.4.4"
 
 nodeSelector: {}
 
