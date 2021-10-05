@@ -39,6 +39,11 @@ clusterissuerappspre:
   privateKeySecretRef: "letsencryptappspre"
   ingressclass: "eks-tyc-ingress-nginx-apps-pre"
 
+clusterissuerinternal:
+  mail: "felix.centenera@vass.es"
+  privateKeySecretRef: "letsencryptappspre"
+  ingressclass: "ingressinternal"
+
 installCRDs: false
 
 replicaCount: 1
