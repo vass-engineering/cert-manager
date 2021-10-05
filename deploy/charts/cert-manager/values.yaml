@@ -41,7 +41,7 @@ clusterissuerappspre:
 
 clusterissuerinternal:
   mail: "felix.centenera@vass.es"
-  privateKeySecretRef: "letsencryptappspre"
+  privateKeySecretRef: "letsencryptingressinternal"
   ingressclass: "ingressinternal"
 
 installCRDs: false
