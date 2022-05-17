@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,26 +18,36 @@ package controller
 
 import (
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 var (
+	// KeyFunc creates a key for an API object. The key can be passed to a
+	// worker function that processes an object from a queue such as
+	// ProcessItem.
 	KeyFunc = cache.DeletionHandlingMetaNamespaceKeyFunc
 )
 
+// DefaultItemBasedRateLimiter returns a new rate limiter with base delay of 5
+// seconds, max delay of 5 minutes.
 func DefaultItemBasedRateLimiter() workqueue.RateLimiter {
 	return workqueue.NewItemExponentialFailureRateLimiter(time.Second*5, time.Minute*5)
 }
 
+// HandleOwnedResourceNamespacedFunc returns a function thataccepts a
+// Kubernetes object and adds its owner references to the workqueue.
+// https://kubernetes.io/docs/concepts/workloads/controllers/garbage-collection/#owners-and-dependents
 func HandleOwnedResourceNamespacedFunc(log logr.Logger, queue workqueue.RateLimitingInterface, ownerGVK schema.GroupVersionKind, get func(namespace, name string) (interface{}, error)) func(obj interface{}) {
 	return func(obj interface{}) {
 		log := log.WithName("handleOwnedResource")
@@ -65,13 +75,20 @@ func HandleOwnedResourceNamespacedFunc(log logr.Logger, queue workqueue.RateLimi
 			}
 
 			if refGV.Group == ownerGVK.Group && ref.Kind == ownerGVK.Kind {
-				// TODO: how to handle namespace of owner references?
-				order, err := get(metaobj.GetNamespace(), ref.Name)
-				if err != nil {
-					log.Error(err, "error getting referenced owning resource")
+				obj, err := get(metaobj.GetNamespace(), ref.Name)
+				// This function is always called with a getter
+				// that gets from informers cache. Because this
+				// is also called on cache sync it may be that
+				// the owner is not yet in the cache.
+				if err != nil && errors.IsNotFound(err) {
+					log.Info("owning resource not found in cache")
 					continue
 				}
-				objKey, err := KeyFunc(order)
+				if err != nil {
+					log.Error(err, "error getting referenced owning resource from cache")
+					continue
+				}
+				objKey, err := KeyFunc(obj)
 				if err != nil {
 					log.Error(err, "error computing key for resource")
 					continue
@@ -88,6 +105,7 @@ type QueuingEventHandler struct {
 	Queue workqueue.RateLimitingInterface
 }
 
+// Enqueue adds a key for an object to the workqueue.
 func (q *QueuingEventHandler) Enqueue(obj interface{}) {
 	key, err := KeyFunc(obj)
 	if err != nil {
@@ -97,10 +115,12 @@ func (q *QueuingEventHandler) Enqueue(obj interface{}) {
 	q.Queue.Add(key)
 }
 
+// OnAdd adds a newly created object to the workqueue.
 func (q *QueuingEventHandler) OnAdd(obj interface{}) {
 	q.Enqueue(obj)
 }
 
+// OnUpdate adds an updated object to the workqueue.
 func (q *QueuingEventHandler) OnUpdate(old, new interface{}) {
 	if reflect.DeepEqual(old, new) {
 		return
@@ -108,6 +128,7 @@ func (q *QueuingEventHandler) OnUpdate(old, new interface{}) {
 	q.Enqueue(new)
 }
 
+// OnDelete adds a deleted object to the workqueue for processing.
 func (q *QueuingEventHandler) OnDelete(obj interface{}) {
 	tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 	if ok {
@@ -123,14 +144,17 @@ type BlockingEventHandler struct {
 	WorkFunc func(obj interface{})
 }
 
+// Enqueue synchronously adds a key for an object to the workqueue.
 func (b *BlockingEventHandler) Enqueue(obj interface{}) {
 	b.WorkFunc(obj)
 }
 
+// OnAdd synchronously adds a newly created object to the workqueue.
 func (b *BlockingEventHandler) OnAdd(obj interface{}) {
 	b.WorkFunc(obj)
 }
 
+// OnUpdate synchronously adds an updated object to the workqueue.
 func (b *BlockingEventHandler) OnUpdate(old, new interface{}) {
 	if reflect.DeepEqual(old, new) {
 		return
@@ -138,10 +162,40 @@ func (b *BlockingEventHandler) OnUpdate(old, new interface{}) {
 	b.WorkFunc(new)
 }
 
+// OnDelete synchronously adds a deleted object to the workqueue.
 func (b *BlockingEventHandler) OnDelete(obj interface{}) {
 	tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 	if ok {
 		obj = tombstone.Obj
 	}
 	b.WorkFunc(obj)
+}
+
+// BuildAnnotationsCopy takes a map of annotations and a list of prefix
+// filters and builds a filtered map of annotations. It is used to filter
+// annotations to be copied from Certificate to CertificateRequest and from
+// CertificateSigningRequest to Order.
+func BuildAnnotationsToCopy(allAnnotations map[string]string, prefixes []string) map[string]string {
+	filteredAnnotations := make(map[string]string)
+	includeAll := false
+	for _, v := range prefixes {
+		if v == "*" {
+			includeAll = true
+		}
+	}
+	for _, annotation := range prefixes {
+		prefix := strings.TrimPrefix(annotation, "-")
+		for k, v := range allAnnotations {
+			if strings.HasPrefix(annotation, "-") {
+				if strings.HasPrefix(k, prefix) {
+					// If this is an annotation to not be copied.
+					delete(filteredAnnotations, k)
+				}
+			} else if includeAll || strings.HasPrefix(k, annotation) {
+				// If this is an annotation to be copied or if 'all' should be copied.
+				filteredAnnotations[k] = v
+			}
+		}
+	}
+	return filteredAnnotations
 }

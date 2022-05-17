@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,15 +17,14 @@ limitations under the License.
 package e2e
 
 import (
-	"io/ioutil"
 	"os"
 	"path"
 
 	"github.com/onsi/ginkgo"
 
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	"github.com/jetstack/cert-manager/test/e2e/framework/addon"
-	"github.com/jetstack/cert-manager/test/e2e/framework/log"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/addon"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
 )
 
 var (
@@ -35,8 +34,6 @@ var (
 var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 	addon.InitGlobals(cfg)
 
-	ginkgo.By("Provisioning shared cluster addons")
-
 	err := addon.ProvisionGlobals(cfg)
 	if err != nil {
 		framework.Failf("Error provisioning global addons: %v", err)
@@ -45,8 +42,6 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 	return nil
 }, func([]byte) {
 	addon.InitGlobals(cfg)
-
-	ginkgo.By("Configuring details for shared cluster addons")
 
 	err := addon.SetupGlobals(cfg)
 	if err != nil {
@@ -74,7 +69,7 @@ var _ = ginkgo.SynchronizedAfterSuite(func() {},
 				continue
 			}
 
-			err = ioutil.WriteFile(outPath, []byte(v), 0644)
+			err = os.WriteFile(outPath, []byte(v), 0644)
 			if err != nil {
 				log.Logf("Failed to write log file: %v", err)
 				continue

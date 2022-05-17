@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,12 +21,13 @@ import (
 
 	corelisters "k8s.io/client-go/listers/core/v1"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	"github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/issuer"
-	"github.com/jetstack/cert-manager/pkg/issuer/venafi/client"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/issuer"
+	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
 )
 
 // Venafi is a implementation of govcert library to manager certificates from TPP or Venafi Cloud
@@ -42,6 +43,8 @@ type Venafi struct {
 	resourceNamespace string
 
 	clientBuilder client.VenafiClientBuilder
+
+	metrics *metrics.Metrics
 
 	log logr.Logger
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package chart
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -27,8 +27,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/jetstack/cert-manager/test/e2e/framework/addon/base"
-	"github.com/jetstack/cert-manager/test/e2e/framework/config"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/addon/base"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/config"
 )
 
 // Chart is a generic Helm chart addon for the test environment
@@ -93,7 +93,7 @@ func (c *Chart) Setup(cfg *config.Config) error {
 		return fmt.Errorf("--helm-binary-path must be set")
 	}
 
-	c.home, err = ioutil.TempDir("", "helm-chart-install")
+	c.home, err = os.MkdirTemp("", "helm-chart-install")
 	if err != nil {
 		return err
 	}
@@ -179,7 +179,7 @@ func (c *Chart) getHelmVersion() (string, error) {
 		return "", err
 	}
 
-	outBytes, err := ioutil.ReadAll(out)
+	outBytes, err := io.ReadAll(out)
 	if err != nil {
 		return "", err
 	}

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -35,15 +36,16 @@ import (
 	coretesting "k8s.io/client-go/testing"
 	fakeclock "k8s.io/utils/clock/testing"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/controller/certificaterequests"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/unit/gen"
-	listersfake "github.com/jetstack/cert-manager/test/unit/listers"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	"github.com/cert-manager/cert-manager/pkg/apis/certmanager"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
+	listersfake "github.com/cert-manager/cert-manager/test/unit/listers"
 )
 
 var (
@@ -51,9 +53,9 @@ var (
 	fixedClock      = fakeclock.NewFakeClock(fixedClockStart)
 )
 
-func generateCSR(t *testing.T, secretKey crypto.Signer, alg x509.SignatureAlgorithm) []byte {
+func generateCSR(t *testing.T, secretKey crypto.Signer, alg x509.SignatureAlgorithm, commonName string) []byte {
 	asn1Subj, _ := asn1.Marshal(pkix.Name{
-		CommonName: "test",
+		CommonName: commonName,
 	}.ToRDNSequence())
 	template := x509.CertificateRequest{
 		RawSubject:         asn1Subj,
@@ -106,7 +108,7 @@ func TestSign(t *testing.T) {
 			corev1.TLSPrivateKeyKey: []byte("this is a bad key"),
 		},
 	}
-	csrRSAPEM := generateCSR(t, skRSA, x509.SHA256WithRSA)
+	csrRSAPEM := generateCSR(t, skRSA, x509.SHA256WithRSA, "test-rsa")
 
 	skEC, err := pki.GenerateECPrivateKey(256)
 	if err != nil {
@@ -127,9 +129,11 @@ func TestSign(t *testing.T) {
 			corev1.TLSPrivateKeyKey: skECPEM,
 		},
 	}
-	csrECPEM := generateCSR(t, skEC, x509.ECDSAWithSHA256)
+	csrECPEM := generateCSR(t, skEC, x509.ECDSAWithSHA256, "test-ec")
 
-	baseCR := gen.CertificateRequest("test-cr",
+	csrEmptyCertPEM := generateCSR(t, skEC, x509.ECDSAWithSHA256, "")
+
+	baseCRNotApproved := gen.CertificateRequest("test-cr",
 		gen.SetCertificateRequestAnnotations(
 			map[string]string{
 				cmapi.CertificateRequestPrivateKeyAnnotationKey: rsaKeySecret.Name,
@@ -142,8 +146,29 @@ func TestSign(t *testing.T) {
 			Kind:  "Issuer",
 		}),
 	)
+	baseCRDenied := gen.CertificateRequestFrom(baseCRNotApproved,
+		gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+			Type:               cmapi.CertificateRequestConditionDenied,
+			Status:             cmmeta.ConditionTrue,
+			Reason:             "Foo",
+			Message:            "Certificate request has been denied by cert-manager.io",
+			LastTransitionTime: &metaFixedClockStart,
+		}),
+	)
+	baseCR := gen.CertificateRequestFrom(baseCRNotApproved,
+		gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+			Type:               cmapi.CertificateRequestConditionApproved,
+			Status:             cmmeta.ConditionTrue,
+			Reason:             "cert-manager.io",
+			Message:            "Certificate request has been approved by cert-manager.io",
+			LastTransitionTime: &metaFixedClockStart,
+		}),
+	)
 	ecCR := gen.CertificateRequestFrom(baseCR,
 		gen.SetCertificateRequestCSR(csrECPEM),
+	)
+	emptyCR := gen.CertificateRequestFrom(baseCR,
+		gen.SetCertificateRequestCSR(csrEmptyCertPEM),
 	)
 
 	templateRSA, err := pki.GenerateTemplateFromCertificateRequest(baseCR)
@@ -168,7 +193,51 @@ func TestSign(t *testing.T) {
 		t.FailNow()
 	}
 
+	templateEmptyCert, err := pki.GenerateTemplateFromCertificateRequest(emptyCR)
+	if err != nil {
+		t.Error(err)
+		t.FailNow()
+	}
+
+	emptyCertPEM, _, err := pki.SignCertificate(templateEmptyCert, templateEmptyCert, skEC.Public(), skEC)
+	if err != nil {
+		t.Error(err)
+		t.FailNow()
+	}
+
 	tests := map[string]testT{
+		"a CertificateRequest without an approved condition should do nothing": {
+			certificateRequest: baseCRNotApproved.DeepCopy(),
+			builder: &testpkg.Builder{
+				KubeObjects:        []runtime.Object{},
+				CertManagerObjects: []runtime.Object{baseCRNotApproved.DeepCopy(), baseIssuer.DeepCopy()},
+			},
+		},
+		"a CertificateRequest with a denied condition should update Ready condition with 'Denied'": {
+			certificateRequest: baseCRDenied.DeepCopy(),
+			builder: &testpkg.Builder{
+				KubeObjects:        []runtime.Object{},
+				CertManagerObjects: []runtime.Object{baseCRDenied.DeepCopy(), baseIssuer.DeepCopy()},
+				ExpectedEvents:     []string{},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
+						"status",
+						gen.DefaultTestNamespace,
+						gen.CertificateRequestFrom(baseCRDenied,
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionReady,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Denied",
+								Message:            "The CertificateRequest was denied by an approval controller",
+								LastTransitionTime: &metaFixedClockStart,
+							}),
+							gen.SetCertificateRequestFailureTime(metaFixedClockStart),
+						),
+					)),
+				},
+			},
+		},
 		"a CertificateRequest with no cert-manager.io/selfsigned-private-key annotation should fail": {
 			certificateRequest: gen.CertificateRequestFrom(baseCR,
 				// no annotation
@@ -354,38 +423,6 @@ func TestSign(t *testing.T) {
 			},
 			expectedErr: true,
 		},
-		"a CertificateRequest with a bad CSR should fail": {
-			certificateRequest: gen.CertificateRequestFrom(baseCR,
-				gen.SetCertificateRequestCSR([]byte("this is a bad CSR")),
-			),
-			builder: &testpkg.Builder{
-				KubeObjects: []runtime.Object{rsaKeySecret},
-				CertManagerObjects: []runtime.Object{gen.CertificateRequestFrom(baseCR,
-					gen.SetCertificateRequestCSR([]byte("this is a bad CSR")),
-				), baseIssuer},
-				ExpectedEvents: []string{
-					"Warning BadConfig Resource validation failed: spec.request: Invalid value: []byte{0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x61, 0x20, 0x62, 0x61, 0x64, 0x20, 0x43, 0x53, 0x52}: failed to decode csr: error decoding certificate request PEM block",
-				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
-						"status",
-						gen.DefaultTestNamespace,
-						gen.CertificateRequestFrom(baseCR,
-							gen.SetCertificateRequestCSR([]byte("this is a bad CSR")),
-							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
-								Type:               cmapi.CertificateRequestConditionReady,
-								Status:             cmmeta.ConditionFalse,
-								Reason:             cmapi.CertificateRequestReasonFailed,
-								Message:            "Resource validation failed: spec.request: Invalid value: []byte{0x74, 0x68, 0x69, 0x73, 0x20, 0x69, 0x73, 0x20, 0x61, 0x20, 0x62, 0x61, 0x64, 0x20, 0x43, 0x53, 0x52}: failed to decode csr: error decoding certificate request PEM block",
-								LastTransitionTime: &metaFixedClockStart,
-							}),
-							gen.SetCertificateRequestFailureTime(metaFixedClockStart),
-						),
-					)),
-				},
-			},
-		},
 		"a CSR that has not been signed with the same public key as the referenced private key should fail": {
 			certificateRequest: ecCR.DeepCopy(),
 			builder: &testpkg.Builder{
@@ -519,6 +556,50 @@ func TestSign(t *testing.T) {
 				},
 			},
 		},
+		"should sign a cert with no subject DN and create a warning event": {
+			certificateRequest: emptyCR.DeepCopy(),
+			signingFn: func(c1 *x509.Certificate, c2 *x509.Certificate, pk crypto.PublicKey, sk interface{}) ([]byte, *x509.Certificate, error) {
+				_, cert, err := pki.SignCertificate(c1, c2, pk, sk)
+				if err != nil {
+					return nil, nil, err
+				}
+
+				if cert.Subject.String() != "" {
+					return nil, nil, errors.New("invalid test: cert being issued should have an empty DN")
+				}
+
+				// need to return a known PEM cert as is done in other tets, since the actual issued cert (`cert` above)
+				// will have a different serial number + expiry
+				return emptyCertPEM, nil, nil
+			},
+			builder: &testpkg.Builder{
+				KubeObjects:        []runtime.Object{ecKeySecret},
+				CertManagerObjects: []runtime.Object{emptyCR.DeepCopy(), baseIssuer},
+				ExpectedEvents: []string{
+					fmt.Sprintf("Warning BadConfig %s", emptyDNMessage),
+					"Normal CertificateIssued Certificate fetched from issuer successfully",
+				},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
+						"status",
+						gen.DefaultTestNamespace,
+						gen.CertificateRequestFrom(
+							emptyCR,
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionReady,
+								Status:             cmmeta.ConditionTrue,
+								Reason:             cmapi.CertificateRequestReasonIssued,
+								Message:            "Certificate fetched from issuer successfully",
+								LastTransitionTime: &metaFixedClockStart,
+							}),
+							gen.SetCertificateRequestCertificate(emptyCertPEM),
+							gen.SetCertificateRequestCA(emptyCertPEM),
+						),
+					)),
+				},
+			},
+		},
 	}
 
 	for name, test := range tests {
@@ -545,7 +626,7 @@ func runTest(t *testing.T, test testT) {
 	test.builder.Init()
 	defer test.builder.Stop()
 
-	self := NewSelfSigned(test.builder.Context)
+	self := NewSelfSigned(test.builder.Context).(*SelfSigned)
 
 	if test.fakeLister != nil {
 		self.secretsLister = test.fakeLister
@@ -555,7 +636,10 @@ func runTest(t *testing.T, test testT) {
 		self.signingFn = test.signingFn
 	}
 
-	controller := certificaterequests.New(apiutil.IssuerSelfSigned, self)
+	controller := certificaterequests.New(
+		apiutil.IssuerSelfSigned,
+		func(*controller.Context) certificaterequests.Issuer { return self },
+	)
 	controller.Register(test.builder.Context)
 	test.builder.Start()
 

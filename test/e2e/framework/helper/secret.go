@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,17 +25,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/jetstack/cert-manager/test/e2e/framework/log"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
 )
 
 // WaitForSecretCertificateData waits for the certificate data to be ready
 // inside a Secret created by cert-manager.
 func (h *Helper) WaitForSecretCertificateData(ns, name string, timeout time.Duration) (*corev1.Secret, error) {
 	var secret *corev1.Secret
+	logf, done := log.LogBackoff()
+	defer done()
 	err := wait.PollImmediate(time.Second, timeout,
 		func() (bool, error) {
 			var err error
-			log.Logf("Waiting for Secret %s:%s to contain a certificate", ns, name)
+			logf("Waiting for Secret %s:%s to contain a certificate", ns, name)
 			secret, err = h.KubeClient.CoreV1().Secrets(ns).Get(context.TODO(), name, metav1.GetOptions{})
 			if err != nil {
 				return false, fmt.Errorf("error getting secret %s: %s", name, err)
@@ -45,7 +47,7 @@ func (h *Helper) WaitForSecretCertificateData(ns, name string, timeout time.Dura
 				return true, nil
 			}
 
-			log.Logf("Secret still does not contain certificate data %s/%s",
+			logf("Secret still does not contain certificate data %s/%s",
 				secret.Namespace, secret.Name)
 			return false, nil
 		},

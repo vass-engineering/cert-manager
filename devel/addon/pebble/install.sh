@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2020 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ check_tool kubectl
 check_tool helm
 require_image "pebble:bazel" "//devel/addon/pebble:bundle"
 
-# Ensure the pebble namespace exists
+# Ensure the namespace exists, and if not create it
 kubectl get namespace "${NAMESPACE}" || kubectl create namespace "${NAMESPACE}"
 
 # Upgrade or install Pebble

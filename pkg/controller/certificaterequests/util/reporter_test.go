@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,11 +25,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clocktesting "k8s.io/utils/clock/testing"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	controllertest "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	controllertest "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 var (
@@ -97,6 +97,14 @@ func TestReporter(t *testing.T) {
 		Reason:             "Issued",
 		Message:            "Certificate fetched from issuer successfully",
 		Status:             "True",
+		LastTransitionTime: &nowMetaTime,
+	}
+
+	deniedReadyCondition := cmapi.CertificateRequestCondition{
+		Type:               cmapi.CertificateRequestConditionReady,
+		Reason:             "Denied",
+		Message:            "The CertificateRequest was denied by an approval controller",
+		Status:             "False",
 		LastTransitionTime: &nowMetaTime,
 	}
 
@@ -204,6 +212,27 @@ func TestReporter(t *testing.T) {
 
 			call: "ready",
 		},
+
+		"a denied report should update the Ready condition to 'Denied'": {
+			certificateRequest:  gen.CertificateRequestFrom(baseCR),
+			expectedEvents:      []string{},
+			expectedConditions:  []cmapi.CertificateRequestCondition{deniedReadyCondition},
+			expectedFailureTime: &nowMetaTime,
+
+			call: "denied",
+		},
+
+		"a denied report should update the Ready condition to 'Denied', but not update failure time existing": {
+			certificateRequest: gen.CertificateRequestFrom(baseCR,
+				gen.SetCertificateRequestStatusCondition(deniedReadyCondition),
+				gen.SetCertificateRequestFailureTime(oldMetaTime),
+			),
+			expectedEvents:      []string{},
+			expectedConditions:  []cmapi.CertificateRequestCondition{deniedReadyCondition},
+			expectedFailureTime: &oldMetaTime,
+
+			call: "denied",
+		},
 	}
 
 	for name, test := range tests {
@@ -228,6 +257,8 @@ func (tt *reporterT) runTest(t *testing.T) {
 	case "pending":
 		reporter.Pending(tt.certificateRequest, tt.err,
 			tt.reason, tt.message)
+	case "denied":
+		reporter.Denied(tt.certificateRequest)
 	default:
 		reporter.Ready(tt.certificateRequest)
 	}

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,8 +27,8 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 func (s *Solver) ensureService(ctx context.Context, ch *cmacme.Challenge) (*corev1.Service, error) {
@@ -53,13 +53,13 @@ func (s *Solver) ensureService(ctx context.Context, ch *cmacme.Challenge) (*core
 	}
 
 	log.V(logf.DebugLevel).Info("creating HTTP01 challenge solver service")
-	return s.createService(ch)
+	return s.createService(ctx, ch)
 }
 
 // getServicesForChallenge returns a list of services that were created to solve
 // http challenges for the given domain
 func (s *Solver) getServicesForChallenge(ctx context.Context, ch *cmacme.Challenge) ([]*corev1.Service, error) {
-	log := logf.FromContext(ctx)
+	log := logf.FromContext(ctx).WithName("getServicesForChallenge")
 
 	podLabels := podLabels(ch)
 	selector := labels.NewSelector()
@@ -91,12 +91,12 @@ func (s *Solver) getServicesForChallenge(ctx context.Context, ch *cmacme.Challen
 
 // createService will create the service required to solve this challenge
 // in the target API server.
-func (s *Solver) createService(ch *cmacme.Challenge) (*corev1.Service, error) {
+func (s *Solver) createService(ctx context.Context, ch *cmacme.Challenge) (*corev1.Service, error) {
 	svc, err := buildService(ch)
 	if err != nil {
 		return nil, err
 	}
-	return s.Client.CoreV1().Services(ch.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
+	return s.Client.CoreV1().Services(ch.Namespace).Create(ctx, svc, metav1.CreateOptions{})
 }
 
 func buildService(ch *cmacme.Challenge) (*corev1.Service, error) {
@@ -125,12 +125,12 @@ func buildService(ch *cmacme.Challenge) (*corev1.Service, error) {
 	}
 
 	// checking for presence of http01 config and if set serviceType is set, override our default (NodePort)
-	httpDomainCfg, err := httpDomainCfgForChallenge(ch)
+	serviceType, err := getServiceType(ch)
 	if err != nil {
 		return nil, err
 	}
-	if httpDomainCfg.ServiceType != "" {
-		service.Spec.Type = httpDomainCfg.ServiceType
+	if serviceType != "" {
+		service.Spec.Type = serviceType
 	}
 
 	return service, nil
@@ -148,7 +148,7 @@ func (s *Solver) cleanupServices(ctx context.Context, ch *cmacme.Challenge) erro
 		log := logf.WithRelatedResource(log, service).V(logf.DebugLevel)
 		log.V(logf.DebugLevel).Info("deleting service resource")
 
-		err := s.Client.CoreV1().Services(service.Namespace).Delete(context.TODO(), service.Name, metav1.DeleteOptions{})
+		err := s.Client.CoreV1().Services(service.Namespace).Delete(ctx, service.Name, metav1.DeleteOptions{})
 		if err != nil {
 			log.V(logf.WarnLevel).Info("failed to delete pod resource", "error", err)
 			errs = append(errs, err)

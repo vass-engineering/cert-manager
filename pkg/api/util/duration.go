@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,9 +21,11 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 )
 
+// DefaultCertDuration returns d.Duration if set, otherwise returns
+// cert-manager's default certificate duration (90 days).
 func DefaultCertDuration(d *metav1.Duration) time.Duration {
 	certDuration := v1.DefaultCertificateDuration
 	if d != nil {

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,8 +23,7 @@ package dnsproviders
 import (
 	"fmt"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	cmutil "github.com/jetstack/cert-manager/pkg/util"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 )
 
 var (
@@ -37,8 +36,4 @@ type Details struct {
 
 	// ProviderConfig is the issuer config needed to use these newly created credentials
 	ProviderConfig cmacme.ACMEChallengeSolverDNS01
-}
-
-func (d *Details) NewTestDomain() string {
-	return fmt.Sprintf("%s.%s", cmutil.RandStringRunes(5), d.BaseDomain)
 }

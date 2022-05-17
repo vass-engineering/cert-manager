@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2020 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,9 +31,9 @@ NAMESPACE="${NAMESPACE:-vault}"
 # Release name to use with Helm
 RELEASE_NAME="${RELEASE_NAME:-vault}"
 # Image to use - by default uses a Bazel built image
-IMAGE="${IMAGE:-vault:bazel}"
+IMAGE="${IMAGE:-local/vault:local}"
 
 # Require helm available on PATH
 check_tool kubectl
 check_tool helm
-require_image "vault:bazel" "//devel/addon/vault:bundle"
+require_image "local/vault:local" "//devel/addon/vault:bundle"

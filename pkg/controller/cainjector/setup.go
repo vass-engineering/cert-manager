@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,22 +19,21 @@ package cainjector
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"os"
 
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 	"golang.org/x/sync/errgroup"
-
-	admissionreg "k8s.io/api/admissionregistration/v1beta1"
-	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	admissionreg "k8s.io/api/admissionregistration/v1"
+	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
-	apireg "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1beta1"
+	apireg "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
@@ -79,7 +78,7 @@ var (
 func registerAllInjectors(ctx context.Context, groupName string, mgr ctrl.Manager, sources []caDataSource, client client.Client, ca cache.Cache) error {
 	controllers := make([]controller.Controller, len(injectorSetups))
 	for i, setup := range injectorSetups {
-		controller, err := newGenericInjectionController(groupName, mgr, setup, sources, ca, client)
+		controller, err := newGenericInjectionController(ctx, groupName, mgr, setup, sources, ca, client)
 		if err != nil {
 			if !meta.IsNoMatchError(err) || !setup.injector.IsAlpha() {
 				return err
@@ -93,19 +92,19 @@ func registerAllInjectors(ctx context.Context, groupName string, mgr ctrl.Manage
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() (err error) {
-		if err = ca.Start(gctx.Done()); err != nil {
+		if err = ca.Start(gctx); err != nil {
 			return err
 		}
 		return nil
 	})
-	if ca.WaitForCacheSync(gctx.Done()) {
+	if ca.WaitForCacheSync(gctx) {
 		for _, controller := range controllers {
 			if gctx.Err() != nil {
 				break
 			}
 			controller := controller
 			g.Go(func() (err error) {
-				return controller.Start(gctx.Done())
+				return controller.Start(gctx)
 			})
 		}
 	} else {
@@ -123,7 +122,9 @@ func registerAllInjectors(ctx context.Context, groupName string, mgr ctrl.Manage
 // indexes and event sources. Keep checking new controller-runtime releases for
 // improvements which might make this easier:
 // * https://github.com/kubernetes-sigs/controller-runtime/issues/764
-func newGenericInjectionController(groupName string, mgr ctrl.Manager, setup injectorSetup, sources []caDataSource, ca cache.Cache, client client.Client) (controller.Controller, error) {
+func newGenericInjectionController(ctx context.Context, groupName string, mgr ctrl.Manager,
+	setup injectorSetup, sources []caDataSource, ca cache.Cache,
+	client client.Client) (controller.Controller, error) {
 	log := ctrl.Log.WithName(groupName).WithName(setup.resourceName)
 	typ := setup.injector.NewTarget().AsObject()
 
@@ -148,7 +149,7 @@ func newGenericInjectionController(groupName string, mgr ctrl.Manager, setup inj
 	}
 
 	for _, s := range sources {
-		if err := s.ApplyTo(mgr, setup, c, ca); err != nil {
+		if err := s.ApplyTo(ctx, mgr, setup, c, ca); err != nil {
 			return nil, err
 		}
 	}
@@ -163,7 +164,7 @@ func dataFromSliceOrFile(data []byte, file string) ([]byte, error) {
 		return data, nil
 	}
 	if len(file) > 0 {
-		fileData, err := ioutil.ReadFile(file)
+		fileData, err := os.ReadFile(file)
 		if err != nil {
 			return []byte{}, err
 		}
@@ -237,7 +238,8 @@ func newIndependentCacheAndDelegatingClient(mgr ctrl.Manager) (cache.Cache, clie
 		Scheme: mgr.GetScheme(),
 		Mapper: mgr.GetRESTMapper(),
 	}
-	client, err := manager.DefaultNewClient(ca, mgr.GetConfig(), clientOptions)
+
+	client, err := cluster.DefaultNewClient(ca, mgr.GetConfig(), clientOptions)
 	if err != nil {
 		return nil, nil, err
 	}

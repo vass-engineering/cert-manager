@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2019 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,20 +18,25 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-readonly REPO_ROOT=$(git rev-parse --show-toplevel)
+chart_tarball=${1:-}
+DOCKER=${DOCKER:-docker}
+
+if [ -z "${chart_tarball}" ]; then
+	echo "usage: $0 <path to helm chart tarball>"
+	exit 1
+fi
 
 chart_dir="deploy/charts/cert-manager"
 
-echo "Linting chart: ${chart_dir}"
+echo "Linting chart '${chart_tarball}' using internal dir '${chart_dir}'"
 
-bazel build //deploy/charts/cert-manager
-tmpdir="$(mktemp -d -p "${REPO_ROOT}")"
+tmpdir="$(mktemp -d)"
 trap "rm -rf ${tmpdir}" EXIT
 
-tar -C "${tmpdir}" -xvf bazel-bin/deploy/charts/cert-manager/cert-manager.tgz
+tar -C "${tmpdir}" -xvf $chart_tarball
 
-if ! docker run -v ${tmpdir}:/workspace --workdir /workspace \
-    quay.io/helmpack/chart-testing:v3.0.0-beta.2 \
+if ! ${DOCKER} run -v "${tmpdir}":/workspace --workdir /workspace \
+    quay.io/helmpack/chart-testing:v3.5.1 \
     ct lint \
         --check-version-increment=false \
         --validate-maintainers=false \

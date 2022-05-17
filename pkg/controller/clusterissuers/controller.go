@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,11 +27,11 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 
-	cmclient "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
-	cmlisters "github.com/jetstack/cert-manager/pkg/client/listers/certmanager/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/issuer"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
+	cmlisters "github.com/cert-manager/cert-manager/pkg/client/listers/certmanager/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/issuer"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 type controller struct {
@@ -58,6 +58,9 @@ type controller struct {
 	// clusterResourceNamespace is the namespace used to store resources
 	// referenced by ClusterIssuer resources, e.g. acme account secrets
 	clusterResourceNamespace string
+
+	// fieldManager is the manager name used for the Apply operations.
+	fieldManager string
 }
 
 // Register registers and constructs the controller using the provided context.
@@ -91,13 +94,14 @@ func (c *controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitin
 	// instantiate additional helpers used by this controller
 	c.issuerFactory = issuer.NewFactory(ctx)
 	c.cmClient = ctx.CMClient
+	c.fieldManager = ctx.FieldManager
 	c.recorder = ctx.Recorder
 	c.clusterResourceNamespace = ctx.IssuerOptions.ClusterResourceNamespace
 
 	return c.queue, mustSync, nil
 }
 
-// TODO: replace with generic handleObjet function (like Navigator)
+// TODO: replace with generic handleObject function (like Navigator)
 func (c *controller) secretDeleted(obj interface{}) {
 	log := c.log.WithName("secretDeleted")
 
@@ -152,11 +156,12 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 var keyFunc = controllerpkg.KeyFunc
 
 const (
+	// ControllerName is the name of the ClusterIssuers controller.
 	ControllerName = "clusterissuers"
 )
 
 func init() {
-	controllerpkg.Register(ControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(ControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		return controllerpkg.NewBuilder(ctx, ControllerName).
 			For(&controller{}).
 			Complete()

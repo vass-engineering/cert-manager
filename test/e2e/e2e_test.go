@@ -1,5 +1,7 @@
+//go:build e2e_test
+
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,10 +31,12 @@ import (
 	"github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	_ "github.com/jetstack/cert-manager/test/e2e/suite"
+	"github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite"
 )
+
+var featureGates string
 
 func init() {
 	logs.InitLogs(flag.CommandLine)
@@ -51,6 +55,13 @@ func init() {
 func TestE2E(t *testing.T) {
 	defer logs.FlushLogs()
 	flag.Parse()
+
+	// Disable skipped tests unless they are explicitly requested.
+	// Copied from https://github.com/kubernetes/kubernetes/blob/960e5e78255dd148d4dae49f62e729ea940f4f07/test/e2e/e2e.go#L103-L106
+	// See https://github.com/kubernetes/community/blob/master/contributors/devel/sig-testing/flaky-tests.md#quarantining-flakes
+	if len(ginkgoconfig.GinkgoConfig.FocusStrings) == 0 && len(ginkgoconfig.GinkgoConfig.SkipStrings) == 0 {
+		ginkgoconfig.GinkgoConfig.SkipStrings = []string{`\[Flaky\]`}
+	}
 
 	if err := framework.DefaultConfig.Validate(); err != nil {
 		t.Fatalf("Invalid test config: %v", err)

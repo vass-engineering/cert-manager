@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,21 +18,26 @@ package test
 
 import (
 	"crypto/rsa"
+	"net/http"
 
-	acmecl "github.com/jetstack/cert-manager/pkg/acme/client"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
+	acmecl "github.com/cert-manager/cert-manager/pkg/acme/client"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+
+	"github.com/cert-manager/cert-manager/pkg/acme/accounts"
 )
+
+var _ accounts.Registry = &FakeRegistry{}
 
 // FakeRegistry implements the accounts.Registry interface using stub functions
 type FakeRegistry struct {
-	AddClientFunc    func(uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey)
+	AddClientFunc    func(uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey, userAgent string)
 	RemoveClientFunc func(uid string)
 	GetClientFunc    func(uid string) (acmecl.Interface, error)
 	ListClientsFunc  func() map[string]acmecl.Interface
 }
 
-func (f *FakeRegistry) AddClient(uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey) {
-	f.AddClientFunc(uid, config, privateKey)
+func (f *FakeRegistry) AddClient(client *http.Client, uid string, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey, userAgent string) {
+	f.AddClientFunc(uid, config, privateKey, userAgent)
 }
 
 func (f *FakeRegistry) RemoveClient(uid string) {

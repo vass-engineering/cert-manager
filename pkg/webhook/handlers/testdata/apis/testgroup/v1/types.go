@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,6 +33,11 @@ type TestType struct {
 
 	// TestFieldImmutable cannot be changed after being set to a non-zero value
 	TestFieldImmutable string `json:"testFieldImmutable"`
+
+	// TestDefaultingField is used to test defaulting.
+	// In the v1 API, it defaults to `set-in-v1`.
+	// In the v2 API, it defaults to `set-in-v2`.
+	TestDefaultingField string `json:"testDefaultingField,omitempty"`
 }
 
 const (

@@ -1,4 +1,4 @@
-# Copyright 2019 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,94 +12,55 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Set DOCKER_REGISTRY to customise the image docker repo, e.g. "quay.io/jetstack"
-DOCKER_REGISTRY :=
-APP_VERSION :=
-HACK_DIR ?= hack
+# For details on some of these "prelude" settings, see:
+# https://clarkgrubb.com/makefile-style-guide
+MAKEFLAGS += --warn-undefined-variables --no-builtin-rules
+SHELL := /bin/bash
+.SHELLFLAGS := -uo pipefail -c
+.DEFAULT_GOAL := help
+.DELETE_ON_ERROR:
+.SUFFIXES:
 
-SKIP_GLOBALS := false
-# Skip Venafi tests whilst there are issues with the TPP server
-GINKGO_SKIP := Venafi
-GINKGO_FOCUS :=
+SOURCES := $(shell find . -type f -name "*.go" -not -path "./bin/*" -not -path "./make/*")
 
-## e2e test vars
-KUBECTL ?= kubectl
-KUBECONFIG ?= $$HOME/.kube/config
-FLAKE_ATTEMPTS ?= 1
+## GOBUILDPROCS is passed to GOMAXPROCS when running go build; if you're running
+## make in parallel using "-jN" then you'll probably want to reduce the value
+## of GOBUILDPROCS or else you could end up running N parallel invocations of
+## go build, each of which will spin up as many threads as are available on your
+## system.
+GOBUILDPROCS ?=
 
-# Get a list of all binaries to be built
-CMDS := $(shell find ./cmd/ -maxdepth 1 -type d -exec basename {} \; | grep -v cmd)
+include make/git.mk
 
-.PHONY: help build verify push $(CMDS) e2e_test images images_push \
-	verify_deps verify_chart
+GOFLAGS := -trimpath -ldflags '-w -s \
+	-X github.com/cert-manager/cert-manager/pkg/util.AppVersion=$(RELEASE_VERSION) \
+    -X github.com/cert-manager/cert-manager/pkg/util.AppGitCommit=$(GITCOMMIT)'
 
-help:
-	# This Makefile provides common wrappers around Bazel invocations.
-	#
-	### Verify targets
-	#
-	# verify             - runs all test targets (bazel test //...)
-	# verify_deps        - ensure go module files are up to date (hack/update-deps.sh)
-	# verify_chart       - runs Helm chart linter
-	#
-	### Generate targets
-	#
-	# generate           - regenerate all generated files
-	#
-	### Build targets
-	#
-	# controller         - build a binary of the 'controller'
-	# cainjector         - build a binary of the 'cainjector'
-	# webhook            - build a binary of the 'webhook'
-	# acmesolver         - build a binary of the 'acmesolver'
-	# e2e_test           - builds and runs end-to-end tests.
-	#                      NOTE: you probably want to execute ./hack/ci/run-e2e-kind.sh instead of this target
-	# images             - builds docker images for all of the components, saving them in your Docker daemon
-	# images_push        - pushes docker images to the target registry
-	#
-	# Image targets can be run with optional args DOCKER_REGISTRY and APP_VERSION:
-	#
-	#     make images DOCKER_REGISTRY=quay.io/yourusername APP_VERSION=v0.11.0-dev.my-feature
-	#
+include make/tools.mk
+include make/ci.mk
+include make/test.mk
+include make/base_images.mk
+include make/cmctl.mk
+include make/server.mk
+include make/containers.mk
+include make/release.mk
+include make/manifests.mk
+include make/licenses.mk
+include make/e2e-setup.mk
+include make/help.mk
 
-# Alias targets
-###############
+.PHONY: clean
+## Remove the kind cluster and everything that was built. The downloaded images
+## and tools are kept intact to avoid re-downloading everything. To really wipe
+## out everything, use `make clean-all` instead.
+##
+## @category Development
+clean:
+	@$(eval KIND_CLUSTER_NAME ?= kind)
+	bin/tools/kind delete cluster --name=$(shell cat bin/scratch/kind-exists 2>/dev/null || echo $(KIND_CLUSTER_NAME)) -q 2>/dev/null || true
+	rm -rf $(filter-out bin/downloaded,$(wildcard bin/*))
+	rm -rf bazel-bin bazel-cert-manager bazel-out bazel-testlogs
 
-build: ctl images
-push: docker_push
-
-verify:
-	bazel test //...
-
-# TODO: remove this rule in favour of calling hack/verify-deps directly
-verify_deps:
-	./hack/verify-deps.sh
-	# verify-deps-licenses.sh is implicitly checked by the verify-deps script
-
-# requires docker
-verify_chart:
-	$(HACK_DIR)/verify-chart-version.sh
-
-# Go targets
-############
-$(CMDS):
-	bazel build \
-		//cmd/$@
-
-# Generate targets
-##################
-generate:
-	./hack/update-all.sh
-
-# Docker targets
-################
-images:
-	APP_VERSION=$(APP_VERSION) \
-	DOCKER_REGISTRY=$(DOCKER_REPO) \
-	bazel run \
-		--stamp \
-		--platforms=@io_bazel_rules_go//go/toolchain:linux_amd64 \
-		//build:server-images
-
-ctl:
-	bazel build //cmd/ctl
+.PHONY: clean-all
+clean-all: clean
+	rm -rf bin/

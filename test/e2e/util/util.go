@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,23 +30,23 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	extv1beta1 "k8s.io/api/extensions/v1beta1"
-	apiextcs "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1beta1"
+	networkingv1 "k8s.io/api/networking/v1"
+	networkingv1beta1 "k8s.io/api/networking/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/discovery"
+	gwapiv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	intscheme "github.com/jetstack/cert-manager/pkg/client/clientset/versioned/scheme"
-	clientset "github.com/jetstack/cert-manager/pkg/client/clientset/versioned/typed/certmanager/v1"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/e2e/framework/log"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	clientset "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/typed/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
 )
 
 func CertificateOnlyValidForDomains(cert *x509.Certificate, commonName string, dnsNames ...string) bool {
@@ -70,9 +70,11 @@ func WaitForIssuerStatusFunc(client clientset.IssuerInterface, name string, fn f
 // WaitForIssuerCondition waits for the status of the named issuer to contain
 // a condition whose type and status matches the supplied one.
 func WaitForIssuerCondition(client clientset.IssuerInterface, name string, condition v1.IssuerCondition) error {
+	logf, done := log.LogBackoff()
+	defer done()
 	pollErr := wait.PollImmediate(500*time.Millisecond, time.Minute,
 		func() (bool, error) {
-			log.Logf("Waiting for issuer %v condition %#v", name, condition)
+			logf("Waiting for issuer %v condition %#v", name, condition)
 			issuer, err := client.Get(context.TODO(), name, metav1.GetOptions{})
 			if nil != err {
 				return false, fmt.Errorf("error getting Issuer %q: %v", name, err)
@@ -108,9 +110,11 @@ func wrapErrorWithIssuerStatusCondition(client clientset.IssuerInterface, pollEr
 // WaitForClusterIssuerCondition waits for the status of the named issuer to contain
 // a condition whose type and status matches the supplied one.
 func WaitForClusterIssuerCondition(client clientset.ClusterIssuerInterface, name string, condition v1.IssuerCondition) error {
+	logf, done := log.LogBackoff()
+	defer done()
 	pollErr := wait.PollImmediate(500*time.Millisecond, time.Minute,
 		func() (bool, error) {
-			log.Logf("Waiting for clusterissuer %v condition %#v", name, condition)
+			logf("Waiting for clusterissuer %v condition %#v", name, condition)
 			issuer, err := client.Get(context.TODO(), name, metav1.GetOptions{})
 			if nil != err {
 				return false, fmt.Errorf("error getting ClusterIssuer %v: %v", name, err)
@@ -143,92 +147,14 @@ func wrapErrorWithClusterIssuerStatusCondition(client clientset.ClusterIssuerInt
 	return pollErr
 }
 
-// WaitForCertificateCondition waits for the status of the named Certificate to contain
-// a condition whose type and status matches the supplied one.
-func WaitForCertificateCondition(client clientset.CertificateInterface, name string, condition v1.CertificateCondition, timeout time.Duration) error {
-	pollErr := wait.PollImmediate(500*time.Millisecond, timeout,
-		func() (bool, error) {
-			log.Logf("Waiting for Certificate %v condition %#v", name, condition)
-			certificate, err := client.Get(context.TODO(), name, metav1.GetOptions{})
-			if nil != err {
-				return false, fmt.Errorf("error getting Certificate %v: %v", name, err)
-			}
-
-			return apiutil.CertificateHasCondition(certificate, condition), nil
-		},
-	)
-	return wrapErrorWithCertificateStatusCondition(client, pollErr, name, condition.Type)
-}
-
-// WaitForCertificateEvent waits for an event on the named Certificate to contain
-// an event reason matches the supplied one.
-func WaitForCertificateEvent(client kubernetes.Interface, cert *v1.Certificate, reason string, timeout time.Duration) error {
-	return wait.PollImmediate(500*time.Millisecond, timeout,
-		func() (bool, error) {
-			log.Logf("Waiting for Certificate event %v reason %#v", cert.Name, reason)
-			evts, err := client.CoreV1().Events(cert.Namespace).Search(intscheme.Scheme, cert)
-			if err != nil {
-				return false, fmt.Errorf("error getting Certificate %v: %v", cert.Name, err)
-			}
-
-			return hasEvent(evts, reason), nil
-		},
-	)
-}
-
-func hasEvent(events *corev1.EventList, reason string) bool {
-	for _, evt := range events.Items {
-		if evt.Reason == reason {
-			return true
-		}
-	}
-	return false
-}
-
-// try to retrieve last condition to help diagnose tests.
-func wrapErrorWithCertificateStatusCondition(client clientset.CertificateInterface, pollErr error, name string, conditionType v1.CertificateConditionType) error {
-	if pollErr == nil {
-		return nil
-	}
-
-	certificate, err := client.Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		return pollErr
-	}
-
-	for _, cond := range certificate.Status.Conditions {
-		if cond.Type == conditionType {
-			return fmt.Errorf("%s: Last Status: '%s' Reason: '%s', Message: '%s'", pollErr.Error(), cond.Status, cond.Reason, cond.Message)
-		}
-	}
-
-	return pollErr
-}
-
-// WaitForCertificateToExist waits for the named certificate to exist
-func WaitForCertificateToExist(client clientset.CertificateInterface, name string, timeout time.Duration) error {
-	return wait.PollImmediate(500*time.Millisecond, timeout,
-		func() (bool, error) {
-			log.Logf("Waiting for Certificate %v to exist", name)
-			_, err := client.Get(context.TODO(), name, metav1.GetOptions{})
-			if errors.IsNotFound(err) {
-				return false, nil
-			}
-			if err != nil {
-				return false, fmt.Errorf("error getting Certificate %v: %v", name, err)
-			}
-
-			return true, nil
-		},
-	)
-}
-
 // WaitForCRDToNotExist waits for the CRD with the given name to no
 // longer exist.
-func WaitForCRDToNotExist(client apiextcs.CustomResourceDefinitionInterface, name string) error {
+func WaitForCRDToNotExist(client apiextensionsv1.CustomResourceDefinitionInterface, name string) error {
+	logf, done := log.LogBackoff()
+	defer done()
 	return wait.PollImmediate(500*time.Millisecond, time.Minute,
 		func() (bool, error) {
-			log.Logf("Waiting for CRD %v to not exist", name)
+			logf("Waiting for CRD %v to not exist", name)
 			_, err := client.Get(context.TODO(), name, metav1.GetOptions{})
 			if nil == err {
 				return false, nil
@@ -241,21 +167,6 @@ func WaitForCRDToNotExist(client apiextcs.CustomResourceDefinitionInterface, nam
 			return false, nil
 		},
 	)
-}
-
-func NewCertManagerCAClusterIssuer(name, secretName string) *v1.ClusterIssuer {
-	return &v1.ClusterIssuer{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Spec: v1.IssuerSpec{
-			IssuerConfig: v1.IssuerConfig{
-				CA: &v1.CAIssuer{
-					SecretName: secretName,
-				},
-			},
-		},
-	}
 }
 
 // Deprecated: use test/unit/gen/Certificate in future
@@ -320,6 +231,12 @@ func NewCertManagerBasicCertificateRequest(name, issuerName string, issuerKind s
 			return nil, nil, err
 		}
 		signatureAlgorithm = x509.ECDSAWithSHA256
+	case x509.Ed25519:
+		sk, err = pki.GenerateEd25519PrivateKey()
+		if err != nil {
+			return nil, nil, err
+		}
+		signatureAlgorithm = x509.PureEd25519
 	default:
 		return nil, nil, fmt.Errorf("unrecognised key algorithm: %s", err)
 	}
@@ -379,29 +296,69 @@ func NewCertManagerVaultCertificate(name, secretName, issuerName string, issuerK
 	}
 }
 
-func NewIngress(name, secretName string, annotations map[string]string, dnsNames ...string) *extv1beta1.Ingress {
-	return &extv1beta1.Ingress{
+func NewIngress(name, secretName string, annotations map[string]string, dnsNames ...string) *networkingv1.Ingress {
+	return &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Annotations: annotations,
 		},
-		Spec: extv1beta1.IngressSpec{
-			TLS: []extv1beta1.IngressTLS{
+		Spec: networkingv1.IngressSpec{
+			TLS: []networkingv1.IngressTLS{
 				{
 					Hosts:      dnsNames,
 					SecretName: secretName,
 				},
 			},
-			Rules: []extv1beta1.IngressRule{
+			Rules: []networkingv1.IngressRule{
 				{
 					Host: dnsNames[0],
-					IngressRuleValue: extv1beta1.IngressRuleValue{
-						HTTP: &extv1beta1.HTTPIngressRuleValue{
-							Paths: []extv1beta1.HTTPIngressPath{
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
+								{
+									Path:     "/",
+									PathType: pathTypePrefix(),
+									Backend: networkingv1.IngressBackend{
+										Service: &networkingv1.IngressServiceBackend{
+											Name: "somesvc",
+											Port: networkingv1.ServiceBackendPort{
+												Number: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func NewV1Beta1Ingress(name, secretName string, annotations map[string]string, dnsNames ...string) *networkingv1beta1.Ingress {
+	return &networkingv1beta1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Annotations: annotations,
+		},
+		Spec: networkingv1beta1.IngressSpec{
+			TLS: []networkingv1beta1.IngressTLS{
+				{
+					Hosts:      dnsNames,
+					SecretName: secretName,
+				},
+			},
+			Rules: []networkingv1beta1.IngressRule{
+				{
+					Host: dnsNames[0],
+					IngressRuleValue: networkingv1beta1.IngressRuleValue{
+						HTTP: &networkingv1beta1.HTTPIngressRuleValue{
+							Paths: []networkingv1beta1.HTTPIngressPath{
 								{
 									Path: "/",
-									Backend: extv1beta1.IngressBackend{
-										ServiceName: "dummy-service",
+									Backend: networkingv1beta1.IngressBackend{
+										ServiceName: "somesvc",
 										ServicePort: intstr.FromInt(80),
 									},
 								},
@@ -414,148 +371,64 @@ func NewIngress(name, secretName string, annotations map[string]string, dnsNames
 	}
 }
 
-func NewCertManagerACMEIssuer(name, acmeURL, acmeEmail, acmePrivateKey string) *v1.Issuer {
-	return &v1.Issuer{
+func pathTypePrefix() *networkingv1.PathType {
+	p := networkingv1.PathTypePrefix
+	return &p
+}
+
+// NewGateway creates a new test Gateway. There is no Gateway controller
+// watching the 'foo' gateway class, so this Gateway will not be used to
+// actually route traffic, but can be used to test cert-manager controllers that
+// sync Gateways, such as gateway-shim.
+func NewGateway(gatewayName, ns, secretName string, annotations map[string]string, dnsNames ...string) *gwapiv1alpha2.Gateway {
+
+	return &gwapiv1alpha2.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
+			Name:        gatewayName,
+			Annotations: annotations,
 		},
-		Spec: v1.IssuerSpec{
-			IssuerConfig: v1.IssuerConfig{
-				ACME: &cmacme.ACMEIssuer{
-					Email:         acmeEmail,
-					Server:        acmeURL,
-					SkipTLSVerify: true,
-					PrivateKey: cmmeta.SecretKeySelector{
-						LocalObjectReference: cmmeta.LocalObjectReference{
-							Name: acmePrivateKey,
+		Spec: gwapiv1alpha2.GatewaySpec{
+			GatewayClassName: "foo",
+			Listeners: []gwapiv1alpha2.Listener{{
+				AllowedRoutes: &gwapiv1alpha2.AllowedRoutes{
+					Namespaces: &gwapiv1alpha2.RouteNamespaces{
+						From: func() *gwapiv1alpha2.FromNamespaces { f := gwapiv1alpha2.NamespacesFromSame; return &f }(),
+						Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+							"gw": gatewayName,
+						}},
+					},
+					Kinds: nil,
+				},
+				Name:     "acme-solver",
+				Protocol: gwapiv1alpha2.TCPProtocolType,
+				Port:     gwapiv1alpha2.PortNumber(80),
+				Hostname: (*gwapiv1alpha2.Hostname)(&dnsNames[0]),
+				TLS: &gwapiv1alpha2.GatewayTLSConfig{
+					CertificateRefs: []*gwapiv1alpha2.SecretObjectReference{
+						{
+							Kind:      func() *gwapiv1alpha2.Kind { k := gwapiv1alpha2.Kind("Secret"); return &k }(),
+							Name:      gwapiv1alpha2.ObjectName(secretName),
+							Group:     func() *gwapiv1alpha2.Group { g := gwapiv1alpha2.Group(corev1.GroupName); return &g }(),
+							Namespace: (*gwapiv1alpha2.Namespace)(&ns),
 						},
 					},
 				},
-			},
+			}},
 		},
 	}
 }
 
-func NewCertManagerCAIssuer(name, secretName string) *v1.Issuer {
-	return &v1.Issuer{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Spec: v1.IssuerSpec{
-			IssuerConfig: v1.IssuerConfig{
-				CA: &v1.CAIssuer{
-					SecretName: secretName,
-				},
-			},
-		},
+// HasIngresses lets you know if an API exists in the discovery API
+// calling this function always performs a request to the API server.
+func HasIngresses(d discovery.DiscoveryInterface, GroupVersion string) bool {
+	resourceList, err := d.ServerResourcesForGroupVersion(GroupVersion)
+	if err != nil {
+		return false
 	}
-}
-
-func NewCertManagerSelfSignedIssuer(name string) *v1.Issuer {
-	return &v1.Issuer{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Spec: v1.IssuerSpec{
-			IssuerConfig: v1.IssuerConfig{
-				SelfSigned: &v1.SelfSignedIssuer{},
-			},
-		},
+	for _, r := range resourceList.APIResources {
+		if r.Kind == "Ingress" {
+			return true
+		}
 	}
-}
-
-func NewCertManagerVaultIssuerToken(name, vaultURL, vaultPath, vaultSecretToken, authPath string, caBundle []byte) *v1.Issuer {
-	return &v1.Issuer{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Spec: v1.IssuerSpec{
-			IssuerConfig: v1.IssuerConfig{
-				Vault: &v1.VaultIssuer{
-					Server:   vaultURL,
-					Path:     vaultPath,
-					CABundle: caBundle,
-					Auth: v1.VaultAuth{
-						TokenSecretRef: &cmmeta.SecretKeySelector{
-							Key: "secretkey",
-							LocalObjectReference: cmmeta.LocalObjectReference{
-								Name: vaultSecretToken,
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func NewCertManagerVaultIssuerAppRole(name, vaultURL, vaultPath, roleId, vaultSecretAppRole string, authPath string, caBundle []byte) *v1.Issuer {
-	return &v1.Issuer{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: name,
-		},
-		Spec: newCertManagerVaultIssuerSpecAppRole(vaultURL, vaultPath, roleId, vaultSecretAppRole, authPath, caBundle),
-	}
-}
-
-func NewCertManagerVaultClusterIssuerAppRole(name, vaultURL, vaultPath, roleId, vaultSecretAppRole string, authPath string, caBundle []byte) *v1.ClusterIssuer {
-	return &v1.ClusterIssuer{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: name,
-		},
-		Spec: newCertManagerVaultIssuerSpecAppRole(vaultURL, vaultPath, roleId, vaultSecretAppRole, authPath, caBundle),
-	}
-}
-
-func newCertManagerVaultIssuerSpecAppRole(vaultURL, vaultPath, roleId, vaultSecretAppRole string, authPath string, caBundle []byte) v1.IssuerSpec {
-	return v1.IssuerSpec{
-		IssuerConfig: v1.IssuerConfig{
-			Vault: &v1.VaultIssuer{
-				Server:   vaultURL,
-				Path:     vaultPath,
-				CABundle: caBundle,
-				Auth: v1.VaultAuth{
-					AppRole: &v1.VaultAppRole{
-						Path:   authPath,
-						RoleId: roleId,
-						SecretRef: cmmeta.SecretKeySelector{
-							Key: "secretkey",
-							LocalObjectReference: cmmeta.LocalObjectReference{
-								Name: vaultSecretAppRole,
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func NewCertManagerVaultIssuerKubernetes(name, vaultURL, vaultPath, vaultSecretServiceAccount string, role string, authPath string, caBundle []byte) *v1.Issuer {
-	return &v1.Issuer{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-		Spec: v1.IssuerSpec{
-			IssuerConfig: v1.IssuerConfig{
-				Vault: &v1.VaultIssuer{
-					Server:   vaultURL,
-					Path:     vaultPath,
-					CABundle: caBundle,
-					Auth: v1.VaultAuth{
-						Kubernetes: &v1.VaultKubernetesAuth{
-							Path: authPath,
-							SecretRef: cmmeta.SecretKeySelector{
-								Key: "token",
-								LocalObjectReference: cmmeta.LocalObjectReference{
-									Name: vaultSecretServiceAccount,
-								},
-							},
-							Role: role,
-						},
-					},
-				},
-			},
-		},
-	}
+	return false
 }

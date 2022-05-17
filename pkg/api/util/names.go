@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,10 @@ import (
 	"regexp"
 )
 
+// ComputeName hashes the given object and prefixes it with prefix.
+// The algorithm in use is Fowler–Noll–Vo hash function and is not
+// cryptographically secure. Using a cryptographically secure hash is
+// not necessary.
 func ComputeName(prefix string, obj interface{}) (string, error) {
 	objectBytes, err := json.Marshal(obj)
 	if err != nil {
@@ -43,11 +47,9 @@ func ComputeName(prefix string, obj interface{}) (string, error) {
 	return fmt.Sprintf("%s-%d", prefix, hashF.Sum32()), nil
 }
 
+// DNSSafeShortenTo52Characters shortens the input string to 52 chars and ensures the last char is an alpha-numeric character.
 func DNSSafeShortenTo52Characters(in string) string {
 	if len(in) >= 52 {
-		// shorten the cert name to 52 chars to ensure the total length of the name
-		// also shorten the 52 char string to the last non-symbol character
-		// is less than or equal to 64 characters
 		validCharIndexes := regexp.MustCompile(`[a-zA-Z\d]`).FindAllStringIndex(fmt.Sprintf("%.52s", in), -1)
 		in = in[:validCharIndexes[len(validCharIndexes)-1][1]]
 	}

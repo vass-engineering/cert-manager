@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,13 +19,12 @@ package gen
 import (
 	"crypto"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
 	"net"
 	"net/url"
 
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 type CSRModifier func(*x509.CertificateRequest)
@@ -46,6 +45,12 @@ func CSR(keyAlgorithm x509.PublicKeyAlgorithm, mods ...CSRModifier) (csr []byte,
 			return nil, nil, err
 		}
 		signatureAlgorithm = x509.ECDSAWithSHA256
+	case x509.Ed25519:
+		sk, err = pki.GenerateEd25519PrivateKey()
+		if err != nil {
+			return nil, nil, err
+		}
+		signatureAlgorithm = x509.PureEd25519
 	default:
 		return nil, nil, fmt.Errorf("unrecognised key algorithm: %s", err)
 	}
@@ -58,13 +63,6 @@ func CSR(keyAlgorithm x509.PublicKeyAlgorithm, mods ...CSRModifier) (csr []byte,
 	}
 	for _, mod := range mods {
 		mod(cr)
-	}
-	cn := "test.domain.com"
-	if len(cr.DNSNames) > 0 {
-		cn = cr.DNSNames[0]
-	}
-	cr.Subject = pkix.Name{
-		CommonName: cn,
 	}
 
 	csrBytes, err := pki.EncodeCSR(cr, sk)
@@ -92,5 +90,17 @@ func SetCSRIPAddresses(ips ...net.IP) CSRModifier {
 func SetCSRURIs(uris ...*url.URL) CSRModifier {
 	return func(c *x509.CertificateRequest) {
 		c.URIs = uris
+	}
+}
+
+func SetCSRCommonName(commonName string) CSRModifier {
+	return func(c *x509.CertificateRequest) {
+		c.Subject.CommonName = commonName
+	}
+}
+
+func SetCSREmails(emails []string) CSRModifier {
+	return func(c *x509.CertificateRequest) {
+		c.EmailAddresses = emails
 	}
 }

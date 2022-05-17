@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,16 +21,16 @@ import (
 	"fmt"
 	"time"
 
-	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	restclient "k8s.io/client-go/rest"
 
-	whapi "github.com/jetstack/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	whapi "github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 type Solver struct {
@@ -106,7 +106,7 @@ func (s *Solver) Initialize(kubeClientConfig *restclient.Config, stopCh <-chan s
 	return nil
 }
 
-func (s *Solver) loadConfig(cfgJSON extapi.JSON) (*cmacme.ACMEIssuerDNS01ProviderRFC2136, error) {
+func (s *Solver) loadConfig(cfgJSON apiextensionsv1.JSON) (*cmacme.ACMEIssuerDNS01ProviderRFC2136, error) {
 	cfg := cmacme.ACMEIssuerDNS01ProviderRFC2136{}
 	if err := json.Unmarshal(cfgJSON.Raw, &cfg); err != nil {
 		return nil, fmt.Errorf("error decoding solver config: %v", err)

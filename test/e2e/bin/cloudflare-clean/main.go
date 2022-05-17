@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,11 +17,14 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"time"
 
 	cf "github.com/cloudflare/cloudflare-go"
+
+	"github.com/cert-manager/cert-manager/cmd/util"
 )
 
 var (
@@ -34,14 +37,19 @@ var (
 )
 
 func main() {
+	stopCh, exit := util.SetupExitHandler(util.GracefulShutdown)
+	defer exit() // This function might call os.Exit, so defer last
+
 	flag.Parse()
+
+	ctx := util.ContextWithStopCh(context.Background(), stopCh)
 
 	cl, err := cf.New(*apiKey, *email)
 	if err != nil {
 		log.Fatalf("error creating cloudflare client: %v", err)
 	}
 
-	zones, err := cl.ListZones(*zoneName)
+	zones, err := cl.ListZones(ctx, *zoneName)
 	if err != nil {
 		log.Fatalf("error listing zones: %v", err)
 	}
@@ -52,7 +60,7 @@ func main() {
 		log.Fatalf("found multiple zones for name %q", *zoneName)
 	}
 	zone := zones[0]
-	rrs, err := cl.DNSRecords(zone.ID, cf.DNSRecord{
+	rrs, err := cl.DNSRecords(ctx, zone.ID, cf.DNSRecord{
 		Type: "TXT",
 	})
 	if err != nil {
@@ -76,7 +84,7 @@ func main() {
 			continue
 		}
 
-		err := cl.DeleteDNSRecord(rr.ZoneID, rr.ID)
+		err := cl.DeleteDNSRecord(ctx, rr.ZoneID, rr.ID)
 		if err != nil {
 			log.Printf("Error deleting record: %v", err)
 			errs = append(errs, err)

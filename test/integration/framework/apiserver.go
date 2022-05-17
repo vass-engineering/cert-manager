@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,74 +25,129 @@ import (
 	"strings"
 	"testing"
 
-	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsinstall "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/install"
-	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	jsonserializer "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/runtime/serializer/versioning"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	webhooktesting "github.com/jetstack/cert-manager/cmd/webhook/app/testing"
-	"github.com/jetstack/cert-manager/pkg/api"
-	apitesting "github.com/jetstack/cert-manager/pkg/api/testing"
+	webhooktesting "github.com/cert-manager/cert-manager/cmd/webhook/app/testing"
+	"github.com/cert-manager/cert-manager/internal/test/paths"
+	"github.com/cert-manager/cert-manager/internal/webhook"
+	"github.com/cert-manager/cert-manager/pkg/api"
+	"github.com/cert-manager/cert-manager/pkg/webhook/handlers"
+	"github.com/cert-manager/cert-manager/test/internal/apiserver"
 )
-
-func init() {
-	// Set environment variables for controller-runtime's envtest package.
-	// This is done once as we cannot scope environment variables to a single
-	// invocation of RunControlPlane due to envtest's design.
-	setUpEnvTestEnv()
-}
 
 type StopFunc func()
 
-func RunControlPlane(t *testing.T) (*rest.Config, StopFunc) {
-	webhookOpts, stopWebhook := webhooktesting.StartWebhookServer(t, []string{})
-	crdsDir := apitesting.CRDDirectory(t)
-	crds := readCustomResourcesAtPath(t, crdsDir)
+// controlPlaneOptions has parameters for the control plane of the integration
+// test framework which can be overridden in tests.
+type controlPlaneOptions struct {
+	crdsDir                  *string
+	webhookConversionHandler handlers.ConversionHook
+}
+
+type RunControlPlaneOption func(*controlPlaneOptions)
+
+// WithCRDDirectory allows alternative CRDs to be loaded into the test API
+// server in tests.
+func WithCRDDirectory(directory string) RunControlPlaneOption {
+	return func(o *controlPlaneOptions) {
+		o.crdsDir = pointer.StringPtr(directory)
+	}
+}
+
+// WithWebhookConversionHandler allows the webhook handler for the `/convert`
+// endpoint to be overridden in tests.
+func WithWebhookConversionHandler(handler handlers.ConversionHook) RunControlPlaneOption {
+	return func(o *controlPlaneOptions) {
+		o.webhookConversionHandler = handler
+	}
+}
+
+func RunControlPlane(t *testing.T, ctx context.Context, optionFunctions ...RunControlPlaneOption) (*rest.Config, StopFunc) {
+	crdDirectoryPath, err := paths.CRDDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	options := &controlPlaneOptions{
+		crdsDir: pointer.StringPtr(crdDirectoryPath),
+	}
+
+	for _, f := range optionFunctions {
+		f(options)
+	}
+
+	env, stopControlPlane := apiserver.RunBareControlPlane(t)
+	testuser, err := env.ControlPlane.AddUser(envtest.User{Name: "test-user", Groups: []string{"cluster-admin"}}, env.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	kubeconfig, err := testuser.KubeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := ioutil.TempFile("", "integration-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	defer func() {
+		os.Remove(f.Name())
+	}()
+	if _, err := f.Write(kubeconfig); err != nil {
+		t.Fatal(err)
+	}
+
+	webhookOpts, stopWebhook := webhooktesting.StartWebhookServer(
+		t, ctx, []string{"--kubeconfig", f.Name()},
+		webhook.WithConversionHandler(options.webhookConversionHandler),
+	)
+
+	crds := readCustomResourcesAtPath(t, *options.crdsDir)
 	for _, crd := range crds {
 		t.Logf("Found CRD with name %q", crd.Name)
 	}
 	patchCRDConversion(crds, webhookOpts.URL, webhookOpts.CAPEM)
 
-	env := &envtest.Environment{
-		AttachControlPlaneOutput: false,
-		CRDs:                     crdsToRuntimeObjects(crds),
+	if _, err := envtest.InstallCRDs(env.Config, envtest.CRDInstallOptions{
+		CRDs: crds,
+	}); err != nil {
+		t.Fatal(err)
 	}
 
-	config, err := env.Start()
-	if err != nil {
-		t.Fatalf("failed to start control plane: %v", err)
-	}
-
-	cl, err := client.New(config, client.Options{Scheme: api.Scheme})
+	cl, err := client.New(env.Config, client.Options{Scheme: api.Scheme})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// installing the validating webhooks, not using WebhookInstallOptions as it patches the CA to be it's own
-	err = cl.Create(context.Background(), getValidatingWebhookConfig(webhookOpts.URL, webhookOpts.CAPEM))
+	err = cl.Create(ctx, getValidatingWebhookConfig(webhookOpts.URL, webhookOpts.CAPEM))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// installing the mutating webhooks, not using WebhookInstallOptions as it patches the CA to be it's own
-	err = cl.Create(context.Background(), getMutatingWebhookConfig(webhookOpts.URL, webhookOpts.CAPEM))
+	err = cl.Create(ctx, getMutatingWebhookConfig(webhookOpts.URL, webhookOpts.CAPEM))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	return config, func() {
+	return env.Config, func() {
 		defer stopWebhook()
-		if err := env.Stop(); err != nil {
-			t.Logf("failed to shut down control plane, not failing test: %v", err)
-		}
+		stopControlPlane()
 	}
 }
 
@@ -105,39 +160,33 @@ func init() {
 	apiextensionsinstall.Install(internalScheme)
 }
 
-func patchCRDConversion(crds []*v1.CustomResourceDefinition, url string, caPEM []byte) {
-	for _, crd := range crds {
-		if crd.Spec.Conversion == nil {
-			continue
+// patchCRDConversion overrides the conversion configuration of the CRDs that
+// are loaded in to the integration test API server,
+// configuring the conversion to be handled by the local webhook server.
+func patchCRDConversion(crds []*apiextensionsv1.CustomResourceDefinition, url string, caPEM []byte) {
+	for i := range crds {
+		url := fmt.Sprintf("%s%s", url, "/convert")
+		crds[i].Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
+			Strategy: apiextensionsv1.WebhookConverter,
+			Webhook: &apiextensionsv1.WebhookConversion{
+				ClientConfig: &apiextensionsv1.WebhookClientConfig{
+					URL:      &url,
+					CABundle: caPEM,
+				},
+				ConversionReviewVersions: []string{"v1"},
+			},
 		}
-		if crd.Spec.Conversion.Webhook == nil {
-			continue
-		}
-		if crd.Spec.Conversion.Webhook.ClientConfig == nil {
-			continue
-		}
-		if crd.Spec.Conversion.Webhook.ClientConfig.Service == nil {
-			continue
-		}
-		path := ""
-		if crd.Spec.Conversion.Webhook.ClientConfig.Service.Path != nil {
-			path = *crd.Spec.Conversion.Webhook.ClientConfig.Service.Path
-		}
-		url := fmt.Sprintf("%s%s", url, path)
-		crd.Spec.Conversion.Webhook.ClientConfig.URL = &url
-		crd.Spec.Conversion.Webhook.ClientConfig.CABundle = caPEM
-		crd.Spec.Conversion.Webhook.ClientConfig.Service = nil
 	}
 }
 
-func readCustomResourcesAtPath(t *testing.T, path string) []*v1.CustomResourceDefinition {
+func readCustomResourcesAtPath(t *testing.T, path string) []*apiextensionsv1.CustomResourceDefinition {
 	serializer := jsonserializer.NewSerializerWithOptions(jsonserializer.DefaultMetaFactory, internalScheme, internalScheme, jsonserializer.SerializerOptions{
 		Yaml: true,
 	})
 	converter := runtime.UnsafeObjectConvertor(internalScheme)
 	codec := versioning.NewCodec(serializer, serializer, converter, internalScheme, internalScheme, internalScheme, runtime.InternalGroupVersioner, runtime.InternalGroupVersioner, internalScheme.Name())
 
-	var crds []*v1.CustomResourceDefinition
+	var crds []*apiextensionsv1.CustomResourceDefinition
 	if err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -147,7 +196,7 @@ func readCustomResourcesAtPath(t *testing.T, path string) []*v1.CustomResourceDe
 		}
 		crd, err := readCRDsAtPath(codec, converter, path)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed reading CRDs at path %s: %w", path, err)
 		}
 		crds = append(crds, crd...)
 		return nil
@@ -157,13 +206,13 @@ func readCustomResourcesAtPath(t *testing.T, path string) []*v1.CustomResourceDe
 	return crds
 }
 
-func readCRDsAtPath(codec runtime.Codec, converter runtime.ObjectConvertor, path string) ([]*v1.CustomResourceDefinition, error) {
-	data, err := ioutil.ReadFile(path)
+func readCRDsAtPath(codec runtime.Codec, converter runtime.ObjectConvertor, path string) ([]*apiextensionsv1.CustomResourceDefinition, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	var crds []*v1.CustomResourceDefinition
+	var crds []*apiextensionsv1.CustomResourceDefinition
 	for _, d := range strings.Split(string(data), "\n---\n") {
 		// skip empty YAML documents
 		if strings.TrimSpace(d) == "" {
@@ -175,57 +224,48 @@ func readCRDsAtPath(codec runtime.Codec, converter runtime.ObjectConvertor, path
 			return nil, err
 		}
 
-		out := &v1.CustomResourceDefinition{}
-		if err := converter.Convert(internalCRD, out, nil); err != nil {
+		out := apiextensionsv1.CustomResourceDefinition{}
+		if err := converter.Convert(internalCRD, &out, nil); err != nil {
 			return nil, err
 		}
 
-		crds = append(crds, out)
+		crds = append(crds, &out)
 	}
 
 	return crds, nil
 }
 
-func crdsToRuntimeObjects(in []*v1.CustomResourceDefinition) []runtime.Object {
-	out := make([]runtime.Object, len(in))
-
-	for i, crd := range in {
-		out[i] = runtime.Object(crd)
-	}
-
-	return out
-}
-
-func getValidatingWebhookConfig(url string, caPEM []byte) runtime.Object {
-	failurePolicy := admissionregistrationv1beta1.Fail
-	sideEffects := admissionregistrationv1beta1.SideEffectClassNone
+func getValidatingWebhookConfig(url string, caPEM []byte) client.Object {
+	failurePolicy := admissionregistrationv1.Fail
+	sideEffects := admissionregistrationv1.SideEffectClassNone
 	validateURL := fmt.Sprintf("%s/validate", url)
-	webhook := admissionregistrationv1beta1.ValidatingWebhookConfiguration{
+	webhook := admissionregistrationv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cert-manager-webhook",
 		},
-		Webhooks: []admissionregistrationv1beta1.ValidatingWebhook{
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{
 			{
 				Name: "webhook.cert-manager.io",
-				ClientConfig: admissionregistrationv1beta1.WebhookClientConfig{
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
 					URL:      &validateURL,
 					CABundle: caPEM,
 				},
-				Rules: []admissionregistrationv1beta1.RuleWithOperations{
+				Rules: []admissionregistrationv1.RuleWithOperations{
 					{
-						Operations: []admissionregistrationv1beta1.OperationType{
-							admissionregistrationv1beta1.Create,
-							admissionregistrationv1beta1.Update,
+						Operations: []admissionregistrationv1.OperationType{
+							admissionregistrationv1.Create,
+							admissionregistrationv1.Update,
 						},
-						Rule: admissionregistrationv1beta1.Rule{
+						Rule: admissionregistrationv1.Rule{
 							APIGroups:   []string{"cert-manager.io", "acme.cert-manager.io"},
 							APIVersions: []string{"*"},
 							Resources:   []string{"*/*"},
 						},
 					},
 				},
-				FailurePolicy: &failurePolicy,
-				SideEffects:   &sideEffects,
+				FailurePolicy:           &failurePolicy,
+				SideEffects:             &sideEffects,
+				AdmissionReviewVersions: []string{"v1"},
 			},
 		},
 	}
@@ -233,36 +273,37 @@ func getValidatingWebhookConfig(url string, caPEM []byte) runtime.Object {
 	return &webhook
 }
 
-func getMutatingWebhookConfig(url string, caPEM []byte) runtime.Object {
-	failurePolicy := admissionregistrationv1beta1.Fail
-	sideEffects := admissionregistrationv1beta1.SideEffectClassNone
+func getMutatingWebhookConfig(url string, caPEM []byte) client.Object {
+	failurePolicy := admissionregistrationv1.Fail
+	sideEffects := admissionregistrationv1.SideEffectClassNone
 	validateURL := fmt.Sprintf("%s/mutate", url)
-	webhook := admissionregistrationv1beta1.MutatingWebhookConfiguration{
+	webhook := admissionregistrationv1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cert-manager-webhook",
 		},
-		Webhooks: []admissionregistrationv1beta1.MutatingWebhook{
+		Webhooks: []admissionregistrationv1.MutatingWebhook{
 			{
 				Name: "webhook.cert-manager.io",
-				ClientConfig: admissionregistrationv1beta1.WebhookClientConfig{
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
 					URL:      &validateURL,
 					CABundle: caPEM,
 				},
-				Rules: []admissionregistrationv1beta1.RuleWithOperations{
+				Rules: []admissionregistrationv1.RuleWithOperations{
 					{
-						Operations: []admissionregistrationv1beta1.OperationType{
-							admissionregistrationv1beta1.Create,
-							admissionregistrationv1beta1.Update,
+						Operations: []admissionregistrationv1.OperationType{
+							admissionregistrationv1.Create,
+							admissionregistrationv1.Update,
 						},
-						Rule: admissionregistrationv1beta1.Rule{
+						Rule: admissionregistrationv1.Rule{
 							APIGroups:   []string{"cert-manager.io", "acme.cert-manager.io"},
 							APIVersions: []string{"*"},
 							Resources:   []string{"*/*"},
 						},
 					},
 				},
-				FailurePolicy: &failurePolicy,
-				SideEffects:   &sideEffects,
+				FailurePolicy:           &failurePolicy,
+				SideEffects:             &sideEffects,
+				AdmissionReviewVersions: []string{"v1"},
 			},
 		},
 	}

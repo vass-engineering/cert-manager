@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,21 +17,22 @@ limitations under the License.
 package status
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
-	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 
-	"github.com/jetstack/cert-manager/cmd/ctl/pkg/status/certificate"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/status/certificate"
 )
 
-func NewCmdStatus(ioStreams genericclioptions.IOStreams, factory cmdutil.Factory) *cobra.Command {
+func NewCmdStatus(ctx context.Context, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	cmds := &cobra.Command{
 		Use:   "status",
 		Short: "Get details on current status of cert-manager resources",
 		Long:  `Get details on current status of cert-manager resources, e.g. Certificate`,
 	}
 
-	cmds.AddCommand(certificate.NewCmdStatusCert(ioStreams, factory))
+	cmds.AddCommand(certificate.NewCmdStatusCert(ctx, ioStreams))
 
 	return cmds
 }

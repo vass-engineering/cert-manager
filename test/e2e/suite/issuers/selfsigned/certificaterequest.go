@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,12 +24,12 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager"
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	"github.com/jetstack/cert-manager/test/e2e/util"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	"github.com/cert-manager/cert-manager/pkg/apis/certmanager"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	"github.com/cert-manager/cert-manager/test/e2e/util"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 var _ = framework.CertManagerDescribe("SelfSigned CertificateRequest", func() {
@@ -43,7 +43,10 @@ var _ = framework.CertManagerDescribe("SelfSigned CertificateRequest", func() {
 
 	JustBeforeEach(func() {
 		By("Creating an Issuer")
-		_, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), util.NewCertManagerSelfSignedIssuer(issuerName), metav1.CreateOptions{})
+		issuer := gen.Issuer(issuerName,
+			gen.SetIssuerNamespace(f.Namespace.Name),
+			gen.SetIssuerSelfSigned(v1.SelfSignedIssuer{}))
+		_, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), issuer, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		By("Waiting for Issuer to become Ready")
 		err = util.WaitForIssuerCondition(f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name),
@@ -119,6 +122,27 @@ var _ = framework.CertManagerDescribe("SelfSigned CertificateRequest", func() {
 
 			By("Verifying the Certificate is valid")
 			err = h.WaitCertificateRequestIssuedValid(f.Namespace.Name, certificateRequestName, time.Second*30, rootECKeySigner)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should be able to obtain an Ed25519 Certificate backed by a Ed25519 key", func() {
+			// Replace previous key secret with Ed25519 one
+			_, err := f.KubeClientSet.CoreV1().Secrets(f.Namespace.Name).Update(context.TODO(), newPrivateKeySecret(
+				certificateRequestSecretName, f.Namespace.Name, rootEd25519Key), metav1.UpdateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			crClient := f.CertManagerClientSet.CertmanagerV1().CertificateRequests(f.Namespace.Name)
+			By("Creating a CertificateRequest")
+			csr, err := generateEd25519CSR()
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = crClient.Create(context.TODO(), gen.CertificateRequestFrom(basicCR,
+				gen.SetCertificateRequestCSR(csr),
+			), metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying the Certificate is valid")
+			err = h.WaitCertificateRequestIssuedValid(f.Namespace.Name, certificateRequestName, time.Second*30, rootEd25519Signer)
 			Expect(err).NotTo(HaveOccurred())
 		})
 

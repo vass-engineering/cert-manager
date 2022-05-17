@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ package fake
 import (
 	"context"
 
-	acmev1 "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
+	acmev1 "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
@@ -117,7 +117,7 @@ func (c *FakeChallenges) UpdateStatus(ctx context.Context, challenge *acmev1.Cha
 // Delete takes name of the challenge and deletes it. Returns an error if one occurs.
 func (c *FakeChallenges) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
 	_, err := c.Fake.
-		Invokes(testing.NewDeleteAction(challengesResource, c.ns, name), &acmev1.Challenge{})
+		Invokes(testing.NewDeleteActionWithOptions(challengesResource, c.ns, name, opts), &acmev1.Challenge{})
 
 	return err
 }

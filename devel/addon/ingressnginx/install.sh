@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2020 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,12 +34,46 @@ if [[ "$IS_OPENSHIFT" == "true" ]] ; then
 fi
 # Release name to use with Helm
 RELEASE_NAME="${RELEASE_NAME:-ingress-nginx}"
+IMAGE_TAG=""
+HELM_CHART=""
+INGRESS_WITHOUT_CLASS=""
 
-# Require helm available on PATH
+# Require helm, kubectl and yq available on PATH
 check_tool kubectl
 check_tool helm
-require_image "quay.io/kubernetes-ingress-controller/nginx-ingress-controller:0.33.0" "//devel/addon/ingressnginx:bundle"
-require_image "k8s.gcr.io/defaultbackend-amd64:bazel" "//devel/addon/ingressnginx:bundle"
+bazel build //hack/bin:yq
+bindir="$(bazel info bazel-bin)"
+export PATH="${bindir}/hack/bin/:$PATH"
+
+# We need to install different versions of Ingress depending on which version of
+# Kubernetes we are running as the NGINX Ingress controller does not have a
+# release where they would support both v1 and v1beta1 versions of networking API.
+
+# This allows running ./devel/setup-e2e-deps.sh locally against Kubernetes v1.22
+# without passing the K8S_VERSION env var.
+k8s_version=$(kubectl version -oyaml | yq e '.serverVersion | .major +"."+ .minor' -)
+if [[ $k8s_version =~ 1\.18 ]]; then
+  # Ingress v1+ versions only support Kubernetes v1 networking API which is only
+  # available from Kubernetes v1.19 onwards.
+  # TODO: remove this if statement once the oldest version of Kubernetes
+  # supported by cert-manager is v1.19
+  IMAGE_TAG="v0.49.3"
+  HELM_CHART="3.40.0"
+  INGRESS_WITHOUT_CLASS="false"
+  require_image "k8s.gcr.io/ingress-nginx/controller:${IMAGE_TAG}" "//devel/addon/ingressnginx:bundle_pre_networking_v1"
+else
+  IMAGE_TAG="v1.1.0"
+  HELM_CHART="4.0.10"
+  # v1 NGINX-Ingress by default only watches Ingresses with Ingress class
+  # defined. When configuring solver block for ACME HTTTP01 challenge on an ACME
+  # issuer, cert-manager users can currently specify either an Ingress name or a
+  # class. We also e2e test these two ways of creating Ingresses with
+  # ingress-shim. For the ingress controller to watch our Ingresses that don't
+  # have a class, we pass a --watch-ingress-without-class flag
+  # https://github.com/kubernetes/ingress-nginx/blob/main/charts/ingress-nginx/values.yaml#L64-L67
+  INGRESS_WITHOUT_CLASS="true"
+  require_image "k8s.gcr.io/ingress-nginx/controller:${IMAGE_TAG}" "//devel/addon/ingressnginx:bundle"
+fi
 
 # Ensure the ingress-nginx namespace exists
 kubectl get namespace "${NAMESPACE}" || kubectl create namespace "${NAMESPACE}"
@@ -52,18 +86,16 @@ helm repo update
 helm upgrade \
     --install \
     --wait \
-    --version 2.9.0 \
+    --version "${HELM_CHART}" \
     --namespace "${NAMESPACE}" \
-    --set controller.image.tag=0.33.0 \
+    --set controller.image.digest="" \
+    --set controller.image.tag="${IMAGE_TAG}" \
     --set controller.image.pullPolicy=Never \
-    --set defaultBackend.image.tag=bazel \
-    --set defaultBackend.image.pullPolicy=Never \
     --set "controller.service.clusterIP=${SERVICE_IP_PREFIX}.15"\
     --set controller.service.type=ClusterIP \
     --set controller.config.no-tls-redirect-locations="" \
     --set admissionWebhooks.enabled=false \
     --set controller.admissionWebhooks.enabled=false \
-    --set controller.image.runAsUser="" \
-    --set controller.defaultBackend.runAsUser="" \
+    --set controller.watchIngressWithoutClass="${INGRESS_WITHOUT_CLASS}" \
     "$RELEASE_NAME" \
     ingress-nginx/ingress-nginx

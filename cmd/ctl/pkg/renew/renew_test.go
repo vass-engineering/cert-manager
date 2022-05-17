@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package renew
 
 import (
+	"context"
 	"testing"
 
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -75,7 +76,7 @@ func TestValidate(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			cmd := NewCmdRenew(genericclioptions.IOStreams{}, nil)
+			cmd := NewCmdRenew(context.TODO(), genericclioptions.IOStreams{})
 
 			// This is normally registered in the main func. We add here to test
 			// against flags normally inherited.

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,11 +27,11 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	"github.com/jetstack/cert-manager/test/e2e/util"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	"github.com/cert-manager/cert-manager/test/e2e/util"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 func exampleURLs() (urls []*url.URL) {
@@ -58,7 +58,10 @@ var _ = framework.CertManagerDescribe("CA CertificateRequest", func() {
 
 	JustBeforeEach(func() {
 		By("Creating an Issuer")
-		_, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), util.NewCertManagerCAIssuer(issuerName, issuerSecretName), metav1.CreateOptions{})
+		issuer := gen.Issuer(issuerName,
+			gen.SetIssuerNamespace(f.Namespace.Name),
+			gen.SetIssuerCASecretName(issuerSecretName))
+		_, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), issuer, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		By("Waiting for Issuer to become Ready")
 		err = util.WaitForIssuerCondition(f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name),
@@ -109,6 +112,23 @@ var _ = framework.CertManagerDescribe("CA CertificateRequest", func() {
 					Duration: time.Hour * 24 * 90,
 				},
 				exampleDNSNames, exampleIPAddresses, exampleURIs, x509.ECDSA)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = certRequestClient.Create(context.TODO(), cr, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			By("Verifying the Certificate is valid")
+			err = h.WaitCertificateRequestIssuedValidTLS(f.Namespace.Name, certificateRequestName, time.Second*30, key, []byte(rootCert))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should be able to obtain an Ed25519 key from a RSA backed issuer", func() {
+			certRequestClient := f.CertManagerClientSet.CertmanagerV1().CertificateRequests(f.Namespace.Name)
+
+			By("Creating a CertificateRequest")
+			cr, key, err := util.NewCertManagerBasicCertificateRequest(certificateRequestName, issuerName, v1.IssuerKind,
+				&metav1.Duration{
+					Duration: time.Hour * 24 * 90,
+				},
+				exampleDNSNames, exampleIPAddresses, exampleURIs, x509.Ed25519)
 			Expect(err).NotTo(HaveOccurred())
 			_, err = certRequestClient.Create(context.TODO(), cr, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())

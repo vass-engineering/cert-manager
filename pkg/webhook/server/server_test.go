@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,16 +17,17 @@ limitations under the License.
 package server
 
 import (
+	"context"
 	"testing"
 
+	logtesting "github.com/go-logr/logr/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	testingcmlogs "github.com/jetstack/cert-manager/pkg/logs/testing"
-	"github.com/jetstack/cert-manager/pkg/webhook/handlers"
+	"github.com/cert-manager/cert-manager/pkg/webhook/handlers"
 )
 
 func TestConvert(t *testing.T) {
@@ -42,10 +43,11 @@ func TestConvert(t *testing.T) {
 			err:  "unsupported conversion review type: *v1.CustomResourceDefinition",
 		},
 		{
-			name: "v1beta1 conversion review",
+			name: "unsupported conversion review version",
 			in: &apiextensionsv1beta1.ConversionReview{
 				Request: &apiextensionsv1beta1.ConversionRequest{},
 			},
+			err: "unsupported conversion review type: *v1beta1.ConversionReview",
 		},
 		{
 			name: "v1 conversion review",
@@ -58,21 +60,16 @@ func TestConvert(t *testing.T) {
 			in:   &apiextensionsv1.ConversionReview{},
 			err:  "review.request was nil",
 		},
-		{
-			name: "v1beta1 conversion review with nil Request",
-			in:   &apiextensionsv1beta1.ConversionReview{},
-			err:  "review.request was nil",
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			log := &testingcmlogs.TestLogger{T: t}
+			log := logtesting.NewTestLogger(t)
 			s := &Server{
 				ConversionWebhook: handlers.NewSchemeBackedConverter(log, defaultScheme),
-				Log:               log,
+				log:               log,
 			}
-			out, err := s.convert(tc.in)
+			out, err := s.convert(context.TODO(), tc.in)
 			if tc.err != "" {
 				assert.EqualError(t, err, tc.err)
 				assert.Nil(t, out)

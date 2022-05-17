@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,16 +22,16 @@ import (
 	"errors"
 	"fmt"
 
-	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/rest"
 
-	"github.com/jetstack/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	"github.com/jetstack/cert-manager/pkg/client/clientset/versioned/scheme"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	"github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/scheme"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 type Webhook struct {
@@ -160,7 +160,7 @@ func (r *Webhook) buildPayload(ch *v1alpha1.ChallengeRequest, action v1alpha1.Ch
 	return cl, pl, cfg.SolverName, nil
 }
 
-func loadConfig(cfgJSON apiext.JSON) (*cmacme.ACMEIssuerDNS01ProviderWebhook, error) {
+func loadConfig(cfgJSON apiextensionsv1.JSON) (*cmacme.ACMEIssuerDNS01ProviderWebhook, error) {
 	cfg := cmacme.ACMEIssuerDNS01ProviderWebhook{}
 	if err := json.Unmarshal(cfgJSON.Raw, &cfg); err != nil {
 		return nil, fmt.Errorf("error decoding solver config: %v", err)

@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,25 +24,22 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/jetstack/cert-manager/cmd/cainjector/app"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	utilcmd "github.com/jetstack/cert-manager/pkg/util/cmd"
+	"github.com/cert-manager/cert-manager/cmd/cainjector/app"
+	"github.com/cert-manager/cert-manager/cmd/util"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 func main() {
+	// Set up signal handlers and a cancellable context which gets cancelled on
+	// when either SIGINT or SIGTERM are received.
+	stopCh, exit := util.SetupExitHandler(util.GracefulShutdown)
+	defer exit() // This function might call os.Exit, so defer last
+
 	logf.InitLogs(flag.CommandLine)
 	defer logf.FlushLogs()
 	ctrl.SetLogger(logf.Log)
 
-	// Set up signal handlers and a cancellable context which gets cancelled on
-	// when either SIGINT or SIGTERM are received.
-	stopCh := utilcmd.SetupSignalHandler()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		<-stopCh
-		cancel()
-	}()
+	ctx := util.ContextWithStopCh(context.Background(), stopCh)
 
 	cmd := app.NewCommandStartInjectorController(ctx, os.Stdout, os.Stderr)
 	cmd.Flags().AddGoFlagSet(flag.CommandLine)
@@ -50,6 +47,6 @@ func main() {
 	flag.CommandLine.Parse([]string{})
 	if err := cmd.Execute(); err != nil {
 		cmd.PrintErrln(err)
-		os.Exit(1)
+		util.SetExitCode(err)
 	}
 }

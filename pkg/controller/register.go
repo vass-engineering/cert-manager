@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,10 +31,10 @@ type Interface interface {
 
 // Constructor is a function that creates a new control loop given a
 // controller Context.
-type Constructor func(ctx *Context) (Interface, error)
+type Constructor func(ctx *ContextFactory) (Interface, error)
 
 var (
-	known = make(map[string]Constructor, 0)
+	known = make(map[string]Constructor)
 )
 
 // Known returns a map of the registered controller Constructors

@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,14 +17,13 @@ limitations under the License.
 package main
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestRun(t *testing.T) {
-	rootDir, err := ioutil.TempDir(os.TempDir(), "cert-manager-cobra")
+	rootDir, err := os.MkdirTemp(os.TempDir(), "cert-manager-cobra")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +48,7 @@ func TestRun(t *testing.T) {
 		},
 		"if directory given, should write docs": {
 			input:   []string{"cobra", filepath.Join(rootDir, "foo")},
-			expDirs: []string{"foo/ca-injector", "foo/cert-manager-controller", "foo/cert-manager"},
+			expDirs: []string{"foo/ca-injector", "foo/cert-manager-controller", "foo/cmctl"},
 		},
 	}
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Selector determines whether a kubernetes object matches the
+// criteria checked by the implementation.
 type Selector interface {
 	// Matches returns the number of matches that this selector
 	// has with the given object metadata and dnsName.

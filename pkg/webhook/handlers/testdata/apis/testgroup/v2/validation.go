@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,15 +17,16 @@ limitations under the License.
 package v2
 
 import (
+	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-func ValidateTestType(obj runtime.Object) field.ErrorList {
+func ValidateTestType(_ *admissionv1.AdmissionRequest, obj runtime.Object) (field.ErrorList, []string) {
 	el := field.ErrorList{}
 	tt := obj.(*TestType)
 	if tt.TestField == DisallowedTestFieldValue {
 		el = append(el, field.Invalid(field.NewPath("testField"), tt.TestField, "value not allowed"))
 	}
-	return el
+	return el, nil
 }

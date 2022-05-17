@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2020 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,37 +31,36 @@ source "${SCRIPT_ROOT}/lib/lib.sh"
 # Configure PATH to use bazel provided e2e tools
 setup_tools
 
+echo "Installing kyverno into cluster..."
+"${SCRIPT_ROOT}/addon/kyverno/install.sh"
+
+# cert-manager needs the gateway-api to be installed to start.
+echo "Installing gateway-api into the cluster..."
+"${SCRIPT_ROOT}/addon/gatewayapi/install.sh"
+
 echo "Installing cert-manager into the cluster..."
 "${SCRIPT_ROOT}/addon/certmanager/install.sh"
 
 check_bazel
 bazel build --platforms=@io_bazel_rules_go//go/toolchain:linux_amd64 //devel/addon/...
 
-EXIT=0
-
 echo "Installing sample-webhook into the cluster..."
-"${SCRIPT_ROOT}/addon/samplewebhook/install.sh" &
+"${SCRIPT_ROOT}/addon/samplewebhook/install.sh"
 
 echo "Installing bind into the cluster..."
-"${SCRIPT_ROOT}/addon/bind/install.sh" &
+"${SCRIPT_ROOT}/addon/bind/install.sh"
 
 echo "Installing pebble into the cluster..."
-"${SCRIPT_ROOT}/addon/pebble/install.sh" &
+"${SCRIPT_ROOT}/addon/pebble/install.sh"
 
 echo "Installing ingress-nginx into the cluster..."
-"${SCRIPT_ROOT}/addon/ingressnginx/install.sh" &
+"${SCRIPT_ROOT}/addon/ingressnginx/install.sh"
 
 echo "Loading vault into the cluster..."
-"${SCRIPT_ROOT}/addon/vault/install.sh" &
+"${SCRIPT_ROOT}/addon/vault/install.sh"
 
-# Wait for all background jobs to finish and exit with non-zero if any of them fail
-# See https://stackoverflow.com/a/515170/919436
-for job in $(jobs -p); do
-    wait $job || let "EXIT+=1"
-done
+echo "Installing sample-external-issuer into the cluster..."
+"${SCRIPT_ROOT}/addon/sample-external-issuer/install.sh"
 
-if [[ "$EXIT" > 0 ]]; then
-    echo "ERROR: ${EXIT} setup jobs failed. Check logs above for details."
-fi
-
-exit $EXIT
+echo "Installing Contour into the cluster"
+"${SCRIPT_ROOT}/addon/projectcontour/install.sh"

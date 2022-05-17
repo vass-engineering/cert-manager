@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ package fake
 import (
 	"context"
 
-	certmanagerv1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
+	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
@@ -117,7 +117,7 @@ func (c *FakeCertificates) UpdateStatus(ctx context.Context, certificate *certma
 // Delete takes name of the certificate and deletes it. Returns an error if one occurs.
 func (c *FakeCertificates) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
 	_, err := c.Fake.
-		Invokes(testing.NewDeleteAction(certificatesResource, c.ns, name), &certmanagerv1.Certificate{})
+		Invokes(testing.NewDeleteActionWithOptions(certificatesResource, c.ns, name, opts), &certmanagerv1.Certificate{})
 
 	return err
 }

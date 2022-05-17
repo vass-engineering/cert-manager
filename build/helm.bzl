@@ -1,4 +1,4 @@
-# Copyright 2020 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -102,7 +102,7 @@ def helm_tmpl(
     cmds = []
     set_args = []
     for k, v in values.items():
-        set_args = set_args + ["--set=%s=%s" % (k, v)]
+        set_args = set_args + ["--set=\"%s=%s\"" % (k, v)]
     tmpl_cmd = [
         "$(location %s)" % helm_cmd,
         "template",

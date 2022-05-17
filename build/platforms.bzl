@@ -1,4 +1,4 @@
-# Copyright 2020 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ CLIENT_PLATFORMS = {
 
 TEST_PLATFORMS = {
     "linux": ["amd64"],
-    "darwin": ["amd64"],
+    "darwin": ["amd64", "arm64"],
 }
 
 # Helper which produces the ALL_PLATFORMS dictionary, currently composed of

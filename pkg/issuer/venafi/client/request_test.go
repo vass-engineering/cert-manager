@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,10 +30,10 @@ import (
 	"github.com/Venafi/vcert/v4/pkg/endpoint"
 	"github.com/Venafi/vcert/v4/pkg/venafi/fake"
 
-	"github.com/jetstack/cert-manager/pkg/issuer/venafi/client/api"
-	internalfake "github.com/jetstack/cert-manager/pkg/issuer/venafi/client/fake"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client/api"
+	internalfake "github.com/cert-manager/cert-manager/pkg/issuer/venafi/client/fake"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 func checkCertificateIssued(t *testing.T, csrPEM []byte, resp []byte) {

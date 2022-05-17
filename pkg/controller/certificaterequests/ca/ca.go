@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,22 +18,23 @@ package ca
 
 import (
 	"context"
+	"crypto"
 	"crypto/x509"
 	"fmt"
 
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	corelisters "k8s.io/client-go/listers/core/v1"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificaterequests"
-	crutil "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/util"
-	issuerpkg "github.com/jetstack/cert-manager/pkg/issuer"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	cmerrors "github.com/jetstack/cert-manager/pkg/util/errors"
-	"github.com/jetstack/cert-manager/pkg/util/kube"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
+	crutil "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/util"
+	issuerpkg "github.com/cert-manager/cert-manager/pkg/issuer"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	cmerrors "github.com/cert-manager/cert-manager/pkg/util/errors"
+	"github.com/cert-manager/cert-manager/pkg/util/kube"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 const (
@@ -41,6 +42,7 @@ const (
 )
 
 type templateGenerator func(*cmapi.CertificateRequest) (*x509.Certificate, error)
+type signingFn func([]*x509.Certificate, crypto.Signer, *x509.Certificate) (pki.PEMBundle, error)
 
 type CA struct {
 	issuerOptions controllerpkg.IssuerOptions
@@ -50,26 +52,31 @@ type CA struct {
 
 	// Used for testing to get reproducible resulting certificates
 	templateGenerator templateGenerator
+	signingFn         signingFn
 }
 
 func init() {
 	// create certificate request controller for ca issuer
-	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		return controllerpkg.NewBuilder(ctx, CRControllerName).
-			For(certificaterequests.New(apiutil.IssuerCA, NewCA(ctx))).
+			For(certificaterequests.New(apiutil.IssuerCA, NewCA)).
 			Complete()
 	})
 }
 
-func NewCA(ctx *controllerpkg.Context) *CA {
+func NewCA(ctx *controllerpkg.Context) certificaterequests.Issuer {
 	return &CA{
 		issuerOptions:     ctx.IssuerOptions,
 		secretsLister:     ctx.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
 		reporter:          crutil.NewReporter(ctx.Clock, ctx.Recorder),
 		templateGenerator: pki.GenerateTemplateFromCertificateRequest,
+		signingFn:         pki.SignCSRTemplate,
 	}
 }
 
+// Sign signs a certificate request. Returns a nil certificate and no error when
+// the error is not retryable, i.e., re-running the Sign command will lead to
+// the same result. A retryable error would be for example a network failure.
 func (c *CA) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuerObj cmapi.GenericIssuer) (*issuerpkg.IssueResponse, error) {
 	log := logf.FromContext(ctx, "sign")
 
@@ -77,7 +84,7 @@ func (c *CA) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuerObj c
 	resourceNamespace := c.issuerOptions.ResourceNamespace(issuerObj)
 
 	// get a copy of the CA certificate named on the Issuer
-	caCerts, caKey, err := kube.SecretTLSKeyPair(ctx, c.secretsLister, resourceNamespace, issuerObj.GetSpec().CA.SecretName)
+	caCerts, caKey, err := kube.SecretTLSKeyPairAndCA(ctx, c.secretsLister, resourceNamespace, issuerObj.GetSpec().CA.SecretName)
 	if k8sErrors.IsNotFound(err) {
 		message := fmt.Sprintf("Referenced secret %s/%s not found", resourceNamespace, secretName)
 
@@ -112,8 +119,9 @@ func (c *CA) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuerObj c
 	}
 
 	template.CRLDistributionPoints = issuerObj.GetSpec().CA.CRLDistributionPoints
+	template.OCSPServer = issuerObj.GetSpec().CA.OCSPServers
 
-	certPEM, caPEM, err := pki.SignCSRTemplate(caCerts, caKey, template)
+	bundle, err := c.signingFn(caCerts, caKey, template)
 	if err != nil {
 		message := "Error signing certificate"
 		c.reporter.Failed(cr, err, "SigningError", message)
@@ -124,7 +132,7 @@ func (c *CA) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuerObj c
 	log.V(logf.DebugLevel).Info("certificate issued")
 
 	return &issuerpkg.IssueResponse{
-		Certificate: certPEM,
-		CA:          caPEM,
+		Certificate: bundle.ChainPEM,
+		CA:          bundle.CAPEM,
 	}, nil
 }

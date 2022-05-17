@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -70,7 +70,7 @@ func (f *fixture) TestBasicPresentRecord(t *testing.T) {
 // record name from the DNS zone.
 func (f *fixture) TestExtendedDeletingOneRecordRetainsOthers(t *testing.T) {
 	if !f.strictMode {
-		t.Skip("skipping test as strict mode is disabled, see: https://github.com/jetstack/cert-manager/pull/1354")
+		t.Skip("skipping test as strict mode is disabled, see: https://github.com/cert-manager/cert-manager/pull/1354")
 	}
 
 	ns, cleanup := f.setupNamespace(t, "extended-supports-multiple-same-domain")

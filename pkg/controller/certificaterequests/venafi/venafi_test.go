@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,10 +24,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"math/big"
 	"testing"
 	"time"
 
 	"github.com/Venafi/vcert/v4/pkg/endpoint"
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,19 +37,20 @@ import (
 	coretesting "k8s.io/client-go/testing"
 	fakeclock "k8s.io/utils/clock/testing"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/controller/certificaterequests"
-	controllertest "github.com/jetstack/cert-manager/pkg/controller/test"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/pkg/issuer/venafi/client"
-	"github.com/jetstack/cert-manager/pkg/issuer/venafi/client/api"
-	internalvenafifake "github.com/jetstack/cert-manager/pkg/issuer/venafi/client/fake"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/unit/gen"
-	testlisters "github.com/jetstack/cert-manager/test/unit/listers"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	"github.com/cert-manager/cert-manager/pkg/apis/certmanager"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
+	controllertest "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client"
+	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client/api"
+	internalvenafifake "github.com/cert-manager/cert-manager/pkg/issuer/venafi/client/fake"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
+	testlisters "github.com/cert-manager/cert-manager/test/unit/listers"
 )
 
 var (
@@ -64,12 +67,12 @@ func generateCSR(t *testing.T, secretKey crypto.Signer, alg x509.SignatureAlgori
 			"foo.example.com", "bar.example.com",
 		},
 		SignatureAlgorithm: alg,
+		PublicKey:          secretKey.Public(),
 	}
 
 	csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &template, secretKey)
 	if err != nil {
-		t.Error(err)
-		t.FailNow()
+		t.Fatal(err)
 	}
 
 	csr := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
@@ -78,13 +81,42 @@ func generateCSR(t *testing.T, secretKey crypto.Signer, alg x509.SignatureAlgori
 }
 
 func TestSign(t *testing.T) {
-	rsaSK, err := pki.GenerateRSAPrivateKey(2048)
+	metaFixedClockStart := metav1.NewTime(fixedClockStart)
+	rootPK, err := pki.GenerateECPrivateKey(256)
 	if err != nil {
-		t.Error(err)
-		t.FailNow()
+		t.Fatal(err)
 	}
 
-	csrPEM := generateCSR(t, rsaSK, x509.SHA1WithRSA)
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rootTmpl := &x509.Certificate{
+		Version:               2,
+		BasicConstraintsValid: true,
+		SerialNumber:          serialNumber,
+		PublicKeyAlgorithm:    x509.ECDSA,
+		PublicKey:             rootPK.Public(),
+		IsCA:                  true,
+		Subject: pkix.Name{
+			CommonName: "root-ca",
+		},
+		NotBefore: time.Now(),
+		NotAfter:  time.Now().Add(time.Minute),
+		KeyUsage:  x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+	}
+	rootPEM, rootCert, err := pki.SignCertificate(rootTmpl, rootTmpl, rootPK.Public(), rootPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testPK, err := pki.GenerateECPrivateKey(256)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	csrPEM := generateCSR(t, testPK, x509.ECDSAWithSHA256)
 
 	tppSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -135,8 +167,26 @@ func TestSign(t *testing.T) {
 		}),
 	)
 
-	baseCR := gen.CertificateRequest("test-cr",
+	baseCRNotApproved := gen.CertificateRequest("test-cr",
 		gen.SetCertificateRequestCSR(csrPEM),
+	)
+	baseCRDenied := gen.CertificateRequestFrom(baseCRNotApproved,
+		gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+			Type:               cmapi.CertificateRequestConditionDenied,
+			Status:             cmmeta.ConditionTrue,
+			Reason:             "Foo",
+			Message:            "Certificate request has been denied by cert-manager.io",
+			LastTransitionTime: &metaFixedClockStart,
+		}),
+	)
+	baseCR := gen.CertificateRequestFrom(baseCRNotApproved,
+		gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+			Type:               cmapi.CertificateRequestConditionApproved,
+			Status:             cmmeta.ConditionTrue,
+			Reason:             "cert-manager.io",
+			Message:            "Certificate request has been approved by cert-manager.io",
+			LastTransitionTime: &metaFixedClockStart,
+		}),
 	)
 
 	tppCR := gen.CertificateRequestFrom(baseCR,
@@ -173,14 +223,12 @@ func TestSign(t *testing.T) {
 
 	template, err := pki.GenerateTemplateFromCertificateRequest(baseCR)
 	if err != nil {
-		t.Error(err)
-		t.FailNow()
+		t.Fatal(err)
 	}
 
-	certPEM, _, err := pki.SignCertificate(template, template, rsaSK.Public(), rsaSK)
+	certPEM, _, err := pki.SignCertificate(template, rootCert, testPK.Public(), rootPK)
 	if err != nil {
-		t.Error(err)
-		t.FailNow()
+		t.Fatal(err)
 	}
 
 	clientReturnsPending := &internalvenafifake.Venafi{
@@ -204,7 +252,7 @@ func TestSign(t *testing.T) {
 			return "test", nil
 		},
 		RetrieveCertificateFn: func(string, []byte, time.Duration, []api.CustomField) ([]byte, error) {
-			return certPEM, nil
+			return append(certPEM, rootPEM...), nil
 		},
 	}
 
@@ -216,7 +264,7 @@ func TestSign(t *testing.T) {
 			return "", errors.New("Custom field not set")
 		},
 		RetrieveCertificateFn: func(string, []byte, time.Duration, []api.CustomField) ([]byte, error) {
-			return certPEM, nil
+			return append(certPEM, rootPEM...), nil
 		},
 	}
 
@@ -226,8 +274,39 @@ func TestSign(t *testing.T) {
 		},
 	}
 
-	metaFixedClockStart := metav1.NewTime(fixedClockStart)
 	tests := map[string]testT{
+		"a CertificateRequest without an approved condition should do nothing": {
+			certificateRequest: baseCRNotApproved.DeepCopy(),
+			builder: &controllertest.Builder{
+				KubeObjects:        []runtime.Object{},
+				CertManagerObjects: []runtime.Object{baseCRNotApproved.DeepCopy(), baseIssuer.DeepCopy()},
+			},
+		},
+		"a CertificateRequest with a denied condition should update Ready condition with 'Denied'": {
+			certificateRequest: baseCRDenied.DeepCopy(),
+			builder: &controllertest.Builder{
+				KubeObjects:        []runtime.Object{},
+				CertManagerObjects: []runtime.Object{baseCRDenied.DeepCopy(), baseIssuer.DeepCopy()},
+				ExpectedEvents:     []string{},
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
+						"status",
+						gen.DefaultTestNamespace,
+						gen.CertificateRequestFrom(baseCRDenied,
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionReady,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Denied",
+								Message:            "The CertificateRequest was denied by an approval controller",
+								LastTransitionTime: &metaFixedClockStart,
+							}),
+							gen.SetCertificateRequestFailureTime(metaFixedClockStart),
+						),
+					)),
+				},
+			},
+		},
 		"tpp: if fail to build client based on missing secret then return nil and hard fail": {
 			certificateRequest: tppCR.DeepCopy(),
 			builder: &controllertest.Builder{
@@ -235,8 +314,8 @@ func TestSign(t *testing.T) {
 				ExpectedEvents: []string{
 					`Normal SecretMissing Required secret resource not found: secret "test-tpp-secret" not found`,
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -255,14 +334,13 @@ func TestSign(t *testing.T) {
 		},
 		"tpp: if fail to build client based on secret lister transient error then return err and set pending": {
 			certificateRequest: tppCR.DeepCopy(),
-			issuer:             tppIssuer,
 			builder: &controllertest.Builder{
 				CertManagerObjects: []runtime.Object{tppCR.DeepCopy(), tppIssuer.DeepCopy()},
 				ExpectedEvents: []string{
 					`Normal VenafiInitError Failed to initialise venafi client for signing: this is a network error`,
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -283,14 +361,13 @@ func TestSign(t *testing.T) {
 		},
 		"cloud: if fail to build client based on missing secret then return nil and hard fail": {
 			certificateRequest: cloudCR.DeepCopy(),
-			issuer:             cloudIssuer,
 			builder: &controllertest.Builder{
 				CertManagerObjects: []runtime.Object{cloudCR.DeepCopy(), cloudIssuer.DeepCopy()},
 				ExpectedEvents: []string{
 					`Normal SecretMissing Required secret resource not found: secret "test-cloud-secret" not found`,
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -314,8 +391,8 @@ func TestSign(t *testing.T) {
 				ExpectedEvents: []string{
 					`Normal VenafiInitError Failed to initialise venafi client for signing: this is a network error`,
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -336,7 +413,7 @@ func TestSign(t *testing.T) {
 		},
 		"should exit nil and set status pending if referenced issuer is not ready": {
 			certificateRequest: cloudCR.DeepCopy(),
-			builder: &testpkg.Builder{
+			builder: &controllertest.Builder{
 				KubeObjects: []runtime.Object{},
 				CertManagerObjects: []runtime.Object{cloudCR.DeepCopy(),
 					gen.Issuer(cloudIssuer.DeepCopy().Name,
@@ -345,8 +422,8 @@ func TestSign(t *testing.T) {
 				ExpectedEvents: []string{
 					"Normal IssuerNotReady Referenced issuer does not have a Ready status condition",
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -372,8 +449,8 @@ func TestSign(t *testing.T) {
 					"Normal IssuancePending Venafi certificate is requested",
 					"Normal IssuancePending Venafi certificate still in a pending state, the request will be retried: Issuance is pending. You may try retrieving the certificate later using Pickup ID: test-cert-id\n\tStatus: test-status-pending",
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"",
 						gen.DefaultTestNamespace,
@@ -388,7 +465,7 @@ func TestSign(t *testing.T) {
 							gen.AddCertificateRequestAnnotations(map[string]string{cmapi.VenafiPickupIDAnnotationKey: "test"}),
 						),
 					)),
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -418,8 +495,8 @@ func TestSign(t *testing.T) {
 					"Normal IssuancePending Venafi certificate is requested",
 					"Normal IssuancePending Venafi certificate still in a pending state, the request will be retried: Issuance is pending. You may try retrieving the certificate later using Pickup ID: test-cert-id\n\tStatus: test-status-pending",
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"",
 						gen.DefaultTestNamespace,
@@ -434,7 +511,7 @@ func TestSign(t *testing.T) {
 							gen.AddCertificateRequestAnnotations(map[string]string{cmapi.VenafiPickupIDAnnotationKey: "test"}),
 						),
 					)),
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -463,8 +540,8 @@ func TestSign(t *testing.T) {
 				ExpectedEvents: []string{
 					"Warning RequestError Failed to request venafi certificate: this is an error",
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -494,8 +571,8 @@ func TestSign(t *testing.T) {
 				ExpectedEvents: []string{
 					"Warning RequestError Failed to request venafi certificate: this is an error",
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -526,8 +603,8 @@ func TestSign(t *testing.T) {
 					"Normal IssuancePending Venafi certificate is requested",
 					"Normal CertificateIssued Certificate fetched from issuer successfully",
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"",
 						gen.DefaultTestNamespace,
@@ -542,7 +619,7 @@ func TestSign(t *testing.T) {
 							gen.AddCertificateRequestAnnotations(map[string]string{cmapi.VenafiPickupIDAnnotationKey: "test"}),
 						),
 					)),
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -555,6 +632,7 @@ func TestSign(t *testing.T) {
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 							gen.SetCertificateRequestCertificate(certPEM),
+							gen.SetCertificateRequestCA(rootPEM),
 							gen.AddCertificateRequestAnnotations(map[string]string{cmapi.VenafiPickupIDAnnotationKey: "test"}),
 						),
 					)),
@@ -572,8 +650,8 @@ func TestSign(t *testing.T) {
 					`Normal IssuancePending Venafi certificate is requested`,
 					"Normal CertificateIssued Certificate fetched from issuer successfully",
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"",
 						gen.DefaultTestNamespace,
@@ -588,7 +666,7 @@ func TestSign(t *testing.T) {
 							gen.AddCertificateRequestAnnotations(map[string]string{cmapi.VenafiPickupIDAnnotationKey: "test"}),
 						),
 					)),
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -601,6 +679,7 @@ func TestSign(t *testing.T) {
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 							gen.SetCertificateRequestCertificate(certPEM),
+							gen.SetCertificateRequestCA(rootPEM),
 							gen.AddCertificateRequestAnnotations(map[string]string{cmapi.VenafiPickupIDAnnotationKey: "test"}),
 						),
 					)),
@@ -611,15 +690,14 @@ func TestSign(t *testing.T) {
 		},
 		"annotations: Custom Fields": {
 			certificateRequest: tppCRWithCustomFields.DeepCopy(),
-			issuer:             tppIssuer,
 			builder: &controllertest.Builder{
 				CertManagerObjects: []runtime.Object{tppCRWithCustomFields.DeepCopy(), tppIssuer.DeepCopy()},
 				ExpectedEvents: []string{
 					"Normal IssuancePending Venafi certificate is requested",
 					"Normal CertificateIssued Certificate fetched from issuer successfully",
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"",
 						gen.DefaultTestNamespace,
@@ -634,7 +712,7 @@ func TestSign(t *testing.T) {
 							gen.AddCertificateRequestAnnotations(map[string]string{cmapi.VenafiPickupIDAnnotationKey: "test"}),
 						),
 					)),
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -647,6 +725,7 @@ func TestSign(t *testing.T) {
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 							gen.SetCertificateRequestCertificate(certPEM),
+							gen.SetCertificateRequestCA(rootPEM),
 							gen.AddCertificateRequestAnnotations(map[string]string{cmapi.VenafiPickupIDAnnotationKey: "test"}),
 						),
 					)),
@@ -658,14 +737,13 @@ func TestSign(t *testing.T) {
 		},
 		"annotations: Error on invalid JSON in custom fields": {
 			certificateRequest: tppCRWithInvalidCustomFields.DeepCopy(),
-			issuer:             tppIssuer,
 			builder: &controllertest.Builder{
 				CertManagerObjects: []runtime.Object{tppCRWithInvalidCustomFields.DeepCopy(), tppIssuer.DeepCopy()},
 				ExpectedEvents: []string{
 					`Warning CustomFieldsError Failed to parse "venafi.cert-manager.io/custom-fields" annotation: invalid character 'c' looking for beginning of value`,
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -689,14 +767,13 @@ func TestSign(t *testing.T) {
 		},
 		"annotations: Error on invalid type in custom fields": {
 			certificateRequest: tppCRWithInvalidCustomFieldType.DeepCopy(),
-			issuer:             tppIssuer,
 			builder: &controllertest.Builder{
 				CertManagerObjects: []runtime.Object{tppCRWithInvalidCustomFieldType.DeepCopy(), tppIssuer.DeepCopy()},
 				ExpectedEvents: []string{
 					`Warning CustomFieldsError certificate request contains an invalid Venafi custom fields type: "Bool": certificate request contains an invalid Venafi custom fields type: "Bool"`,
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+				ExpectedActions: []controllertest.Action{
+					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
 						"status",
 						gen.DefaultTestNamespace,
@@ -731,7 +808,6 @@ func TestSign(t *testing.T) {
 type testT struct {
 	builder            *controllertest.Builder
 	certificateRequest *cmapi.CertificateRequest
-	issuer             cmapi.GenericIssuer
 
 	fakeClient *internalvenafifake.Venafi
 
@@ -747,7 +823,7 @@ func runTest(t *testing.T, test testT) {
 	test.builder.Init()
 	defer test.builder.Stop()
 
-	v := NewVenafi(test.builder.Context)
+	v := NewVenafi(test.builder.Context).(*Venafi)
 
 	if test.fakeSecretLister != nil {
 		v.secretsLister = test.fakeSecretLister
@@ -755,12 +831,15 @@ func runTest(t *testing.T, test testT) {
 
 	if test.fakeClient != nil {
 		v.clientBuilder = func(namespace string, secretsLister corelisters.SecretLister,
-			issuer cmapi.GenericIssuer) (client.Interface, error) {
+			issuer cmapi.GenericIssuer, _ *metrics.Metrics, _ logr.Logger) (client.Interface, error) {
 			return test.fakeClient, nil
 		}
 	}
 
-	controller := certificaterequests.New(apiutil.IssuerVenafi, v)
+	controller := certificaterequests.New(
+		apiutil.IssuerVenafi,
+		func(*controller.Context) certificaterequests.Issuer { return v },
+	)
 	controller.Register(test.builder.Context)
 	test.builder.Start()
 

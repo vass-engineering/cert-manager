@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// +k8s:conversion-gen=github.com/jetstack/cert-manager/pkg/webhook/handlers/testdata/apis/testgroup
+// +k8s:conversion-gen=github.com/cert-manager/cert-manager/pkg/webhook/handlers/testdata/apis/testgroup
 // +k8s:deepcopy-gen=package,register
 // +k8s:defaulter-gen=TypeMeta
 

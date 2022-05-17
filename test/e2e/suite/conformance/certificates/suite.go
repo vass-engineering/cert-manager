@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,15 +17,11 @@ limitations under the License.
 package certificates
 
 import (
-	"fmt"
-	"strings"
-
 	. "github.com/onsi/ginkgo"
 
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	"github.com/jetstack/cert-manager/test/e2e/framework/helper/featureset"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/helper/featureset"
 )
 
 // Suite defines a reusable conformance test suite that can be used against any
@@ -56,6 +52,10 @@ type Suite struct {
 	// nginx-ingress addon.
 	DomainSuffix string
 
+	// HTTP01TestType is set to "Ingress" or "Gateway" to determine which IPs
+	// and Domains will be used to run the ACME HTTP-01 test suites.
+	HTTP01TestType string
+
 	// UnsupportedFeatures is a list of features that are not supported by this
 	// invocation of the test suite.
 	// This is useful if a particular issuers explicitly does not support
@@ -68,12 +68,23 @@ type Suite struct {
 
 // complete will validate configuration and set default values.
 func (s *Suite) complete(f *framework.Framework) {
-	// TODO: work out how to fail an entire 'Describe' block so we can validate these are correctly set
-	//Expect(s.Name).NotTo(Equal(""), "Name must be set")
-	//Expect(s.CreateIssuerFunc).NotTo(BeNil(), "CreateIssuerFunc must be set")
+	if s.Name == "" {
+		Fail("Name must be set")
+	}
+
+	if s.CreateIssuerFunc == nil {
+		Fail("CreateIssuerFunc must be set")
+	}
 
 	if s.DomainSuffix == "" {
-		s.DomainSuffix = f.Config.Addons.IngressController.Domain
+		switch s.HTTP01TestType {
+		case "Ingress":
+			s.DomainSuffix = f.Config.Addons.IngressController.Domain
+		case "Gateway":
+			s.DomainSuffix = f.Config.Addons.Gateway.Domain
+		default:
+			s.DomainSuffix = "example.com"
+		}
 	}
 
 	if s.UnsupportedFeatures == nil {
@@ -86,7 +97,6 @@ func (s *Suite) complete(f *framework.Framework) {
 // it is called by the tests to in Define() to setup and run the test
 func (s *Suite) it(f *framework.Framework, name string, fn func(cmmeta.ObjectReference), requiredFeatures ...featureset.Feature) {
 	if !s.checkFeatures(requiredFeatures...) {
-		fmt.Fprintln(GinkgoWriter, "skipping case due to unsupported features")
 		return
 	}
 	It(name, func() {
@@ -118,23 +128,4 @@ func (s *Suite) checkFeatures(fs ...featureset.Feature) bool {
 		return true
 	}
 	return false
-}
-
-// newDomain will generate a new random subdomain of the DomainSuffix
-func (s *Suite) newDomain() string {
-	return s.newDomainDepth(1)
-}
-
-// newDomainDepth return a new domain name with the given number of subdomains
-// beneath the domain suffix.
-// If depth is zero, the domain suffix will be returned,
-// If depth is one, a random subdomain will be returned e.g. abcd.example.com,
-// If depth is two, a random sub-subdomain will be returned e.g. abcd.efgh.example.com,
-// and so on
-func (s *Suite) newDomainDepth(depth int) string {
-	subdomains := make([]string, depth)
-	for i := 0; i < depth; i++ {
-		subdomains[i] = util.RandStringRunes(4)
-	}
-	return strings.Join(append(subdomains, s.DomainSuffix), ".")
 }

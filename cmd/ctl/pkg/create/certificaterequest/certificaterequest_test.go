@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,9 +17,11 @@ limitations under the License.
 package certificaterequest
 
 import (
-	"io/ioutil"
+	"context"
 	"os"
 	"testing"
+
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/factory"
 )
 
 func TestValidate(t *testing.T) {
@@ -204,18 +206,20 @@ spec:
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			if err := ioutil.WriteFile("testfile.yaml", []byte(test.inputFileContent), 0644); err != nil {
+			if err := os.WriteFile("testfile.yaml", []byte(test.inputFileContent), 0644); err != nil {
 				t.Fatalf("error creating test file %#v", err)
 			}
 			defer os.Remove("testfile.yaml")
 
 			// Options to run create CR command
 			opts := &Options{
-				CmdNamespace:     test.inputNamespace,
-				EnforceNamespace: test.inputNamespace != "",
-				InputFilename:    "testfile.yaml",
-				KeyFilename:      test.keyFilename,
-				CertFileName:     test.certFilename,
+				InputFilename: "testfile.yaml",
+				KeyFilename:   test.keyFilename,
+				CertFileName:  test.certFilename,
+				Factory: &factory.Factory{
+					Namespace:        test.inputNamespace,
+					EnforceNamespace: test.inputNamespace != "",
+				},
 			}
 
 			// Validating args and flags
@@ -225,7 +229,7 @@ spec:
 			}
 
 			// Create CR
-			err = opts.Run(test.inputArgs)
+			err = opts.Run(context.TODO(), test.inputArgs)
 			if err != nil {
 				if !test.expErr {
 					t.Fatalf("got unexpected error when trying to create CR: %v", err)

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,16 +34,17 @@ import (
 	coretesting "k8s.io/client-go/testing"
 	fakeclock "k8s.io/utils/clock/testing"
 
-	"github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/controller/certificaterequests/fake"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/pkg/issuer"
-	issuerfake "github.com/jetstack/cert-manager/pkg/issuer/fake"
-	_ "github.com/jetstack/cert-manager/pkg/issuer/selfsigned"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	"github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/fake"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/issuer"
+	issuerfake "github.com/cert-manager/cert-manager/pkg/issuer/fake"
+	_ "github.com/cert-manager/cert-manager/pkg/issuer/selfsigned"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 var (
@@ -52,6 +53,7 @@ var (
 )
 
 func generateCSR(t *testing.T, secretKey crypto.Signer, alg x509.SignatureAlgorithm) []byte {
+	t.Helper()
 	asn1Subj, _ := asn1.Marshal(pkix.Name{
 		CommonName: "test",
 	}.ToRDNSequence())
@@ -72,6 +74,7 @@ func generateCSR(t *testing.T, secretKey crypto.Signer, alg x509.SignatureAlgori
 }
 
 func generateSelfSignedCert(t *testing.T, cr *cmapi.CertificateRequest, key crypto.Signer, notBefore, notAfter time.Time) []byte {
+	t.Helper()
 	template, err := pki.GenerateTemplateFromCertificateRequest(cr)
 	if err != nil {
 		t.Errorf("failed to generate cert template from CSR: %v", err)
@@ -113,6 +116,7 @@ func TestSync(t *testing.T) {
 	}
 
 	csrRSAPEM := generateCSR(t, skRSA, x509.SHA256WithRSA)
+	csrECPEM := generateCSR(t, skEC, x509.ECDSAWithSHA256)
 
 	baseIssuer := gen.Issuer("test-issuer",
 		gen.SetIssuerSelfSigned(cmapi.SelfSignedIssuer{}),
@@ -122,7 +126,7 @@ func TestSync(t *testing.T) {
 		}),
 	)
 
-	baseCR := gen.CertificateRequest("test-cr",
+	baseCRNotApproved := gen.CertificateRequest("test-cr",
 		gen.SetCertificateRequestIsCA(false),
 		gen.SetCertificateRequestCSR(csrRSAPEM),
 		gen.SetCertificateRequestIssuer(cmmeta.ObjectReference{
@@ -131,17 +135,243 @@ func TestSync(t *testing.T) {
 		}),
 	)
 
+	baseCR := gen.CertificateRequestFrom(baseCRNotApproved,
+		gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+			Type:               cmapi.CertificateRequestConditionApproved,
+			Status:             cmmeta.ConditionTrue,
+			Reason:             "cert-manager.io",
+			Message:            "Certificate request has been approved by cert-manager.io",
+			LastTransitionTime: &nowMetaTime,
+		}),
+	)
+	baseCRNotApprovedEC := gen.CertificateRequest("test-cr",
+		gen.SetCertificateRequestIsCA(false),
+		gen.SetCertificateRequestCSR(csrECPEM),
+		gen.SetCertificateRequestIssuer(cmmeta.ObjectReference{
+			Kind: baseIssuer.Kind,
+			Name: baseIssuer.Name,
+		}),
+	)
+
+	baseCREC := gen.CertificateRequestFrom(baseCRNotApprovedEC,
+		gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+			Type:               cmapi.CertificateRequestConditionApproved,
+			Status:             cmmeta.ConditionTrue,
+			Reason:             "cert-manager.io",
+			Message:            "Certificate request has been approved by cert-manager.io",
+			LastTransitionTime: &nowMetaTime,
+		}),
+	)
+
 	certRSAPEM := generateSelfSignedCert(t, baseCR, skRSA, fixedClockStart, fixedClockStart.Add(time.Hour*12))
 	certRSAPEMExpired := generateSelfSignedCert(t, baseCR, skRSA, fixedClockStart.Add(-time.Hour*13), fixedClockStart.Add(-time.Hour*12))
 
-	certECPEM := generateSelfSignedCert(t, baseCR, skEC, fixedClockStart, fixedClockStart.Add(time.Hour*12))
-	certECPEMExpired := generateSelfSignedCert(t, baseCR, skEC, fixedClockStart.Add(-time.Hour*13), fixedClockStart.Add(-time.Hour*12))
+	certECPEM := generateSelfSignedCert(t, baseCREC, skEC, fixedClockStart, fixedClockStart.Add(time.Hour*12))
+	certECPEMExpired := generateSelfSignedCert(t, baseCREC, skEC, fixedClockStart.Add(-time.Hour*13), fixedClockStart.Add(-time.Hour*12))
 
 	tests := map[string]testT{
 		"should return nil (no action) if group name if not 'cert-manager.io' or ''": {
 			certificateRequest: gen.CertificateRequestFrom(baseCR,
 				gen.SetCertificateRequestIssuer(cmmeta.ObjectReference{
 					Group: "not-cert-manager.io",
+				}),
+			),
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{baseIssuer, baseCR},
+				ExpectedEvents:     []string{},
+				ExpectedActions:    []testpkg.Action{},
+			},
+		},
+		"should return nil (no action) if certificate request is not approved": {
+			certificateRequest: gen.CertificateRequestFrom(baseCRNotApproved),
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{baseIssuer, baseCR},
+				ExpectedEvents:     []string{},
+				ExpectedActions:    []testpkg.Action{},
+			},
+		},
+		"should update Ready condition with 'Denied' if certificate request is denied": {
+			certificateRequest: gen.CertificateRequestFrom(baseCRNotApproved,
+				gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+					Type:               cmapi.CertificateRequestConditionDenied,
+					Status:             cmmeta.ConditionTrue,
+					Reason:             "Foo",
+					Message:            "Certificate request has been denied by cert-manager.io",
+					LastTransitionTime: &nowMetaTime,
+				}),
+			),
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{baseIssuer, baseCR},
+				ExpectedEvents:     []string{},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
+						"status",
+						gen.DefaultTestNamespace,
+						gen.CertificateRequestFrom(baseCRNotApproved,
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionDenied,
+								Status:             cmmeta.ConditionTrue,
+								Reason:             "Foo",
+								Message:            "Certificate request has been denied by cert-manager.io",
+								LastTransitionTime: &nowMetaTime,
+							}),
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionReady,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Denied",
+								Message:            "The CertificateRequest was denied by an approval controller",
+								LastTransitionTime: &nowMetaTime,
+							}),
+							gen.SetCertificateRequestFailureTime(nowMetaTime),
+						),
+					)),
+				},
+			},
+		},
+		"should overwrite Ready condition with Denied if certificate request is denied": {
+			certificateRequest: gen.CertificateRequestFrom(baseCRNotApproved,
+				gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+					Type:               cmapi.CertificateRequestConditionDenied,
+					Status:             cmmeta.ConditionTrue,
+					Reason:             "Foo",
+					Message:            "Certificate request has been denied by cert-manager.io",
+					LastTransitionTime: &nowMetaTime,
+				}),
+				gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+					Type:               cmapi.CertificateRequestConditionReady,
+					Status:             cmmeta.ConditionFalse,
+					Reason:             "Failed",
+					Message:            "Request has failed",
+					LastTransitionTime: &nowMetaTime,
+				}),
+				gen.SetCertificateRequestFailureTime(nowMetaTime),
+			),
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{baseIssuer, baseCR},
+				ExpectedEvents:     []string{},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
+						"status",
+						gen.DefaultTestNamespace,
+						gen.CertificateRequestFrom(baseCRNotApproved,
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionDenied,
+								Status:             cmmeta.ConditionTrue,
+								Reason:             "Foo",
+								Message:            "Certificate request has been denied by cert-manager.io",
+								LastTransitionTime: &nowMetaTime,
+							}),
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionReady,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Denied",
+								Message:            "The CertificateRequest was denied by an approval controller",
+								LastTransitionTime: &nowMetaTime,
+							}),
+							gen.SetCertificateRequestFailureTime(nowMetaTime),
+						),
+					)),
+				},
+			},
+		},
+		"should do nothing if request has a Denied condition and already has a False Ready condition": {
+			certificateRequest: gen.CertificateRequestFrom(baseCRNotApproved,
+				gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+					Type:               cmapi.CertificateRequestConditionDenied,
+					Status:             cmmeta.ConditionTrue,
+					Reason:             "Foo",
+					Message:            "Certificate request has been denied by cert-manager.io",
+					LastTransitionTime: &nowMetaTime,
+				}),
+				gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+					Type:               cmapi.CertificateRequestConditionReady,
+					Status:             cmmeta.ConditionFalse,
+					Reason:             "Denied",
+					Message:            "The CertificateRequest was denied by an approval controller",
+					LastTransitionTime: &nowMetaTime,
+				}),
+				gen.SetCertificateRequestFailureTime(nowMetaTime),
+			),
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{baseIssuer,
+					gen.CertificateRequestFrom(baseCRNotApproved,
+						gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+							Type:               cmapi.CertificateRequestConditionDenied,
+							Status:             cmmeta.ConditionTrue,
+							Reason:             "Foo",
+							Message:            "Certificate request has been denied by cert-manager.io",
+							LastTransitionTime: &nowMetaTime,
+						}),
+						gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+							Type:               cmapi.CertificateRequestConditionReady,
+							Status:             cmmeta.ConditionFalse,
+							Reason:             "Denied",
+							Message:            "The CertificateRequest was denied by an approval controller",
+							LastTransitionTime: &nowMetaTime,
+						}),
+						gen.SetCertificateRequestFailureTime(nowMetaTime),
+					),
+				},
+				ExpectedEvents:  []string{},
+				ExpectedActions: []testpkg.Action{},
+			},
+		},
+		"should set Ready condition reason to Denied if certificate request is denied and has a Pending reason for the Ready condition": {
+			certificateRequest: gen.CertificateRequestFrom(baseCRNotApproved,
+				gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+					Type:               cmapi.CertificateRequestConditionDenied,
+					Status:             cmmeta.ConditionTrue,
+					Reason:             "Foo",
+					Message:            "Certificate request has been denied by cert-manager.io",
+					LastTransitionTime: &nowMetaTime,
+				}),
+				gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+					Type:               cmapi.CertificateRequestConditionReady,
+					Status:             cmmeta.ConditionFalse,
+					Reason:             "Pending",
+					Message:            "Certificate request is pending",
+					LastTransitionTime: &nowMetaTime,
+				}),
+			),
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{baseIssuer, baseCR},
+				ExpectedEvents:     []string{},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
+						"status",
+						gen.DefaultTestNamespace,
+						gen.CertificateRequestFrom(baseCRNotApproved,
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionDenied,
+								Status:             cmmeta.ConditionTrue,
+								Reason:             "Foo",
+								Message:            "Certificate request has been denied by cert-manager.io",
+								LastTransitionTime: &nowMetaTime,
+							}),
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionReady,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Denied",
+								Message:            "The CertificateRequest was denied by an approval controller",
+								LastTransitionTime: &nowMetaTime,
+							}),
+							gen.SetCertificateRequestFailureTime(nowMetaTime),
+						),
+					)),
+				},
+			},
+		},
+		"should return nil (no action) if certificate request approved is set to false": {
+			certificateRequest: gen.CertificateRequestFrom(baseCRNotApproved,
+				gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+					Type:               cmapi.CertificateRequestConditionApproved,
+					Status:             cmmeta.ConditionFalse,
+					Reason:             "cert-manager.io",
+					Message:            "Certificate request has not been approved",
+					LastTransitionTime: &nowMetaTime,
 				}),
 			),
 			builder: &testpkg.Builder{
@@ -292,35 +522,6 @@ func TestSync(t *testing.T) {
 				},
 				ExpectedActions: []testpkg.Action{},
 				ExpectedEvents:  []string{},
-			},
-		},
-		"report failure if the CertificateRequest fails validation": {
-			certificateRequest: gen.CertificateRequestFrom(baseCR,
-				gen.SetCertificateRequestCSR([]byte("bad csr")),
-			),
-			builder: &testpkg.Builder{
-				CertManagerObjects: []runtime.Object{baseCR, baseIssuer},
-				ExpectedEvents: []string{
-					"Warning BadConfig Resource validation failed: spec.request: Invalid value: []byte{0x62, 0x61, 0x64, 0x20, 0x63, 0x73, 0x72}: failed to decode csr: error decoding certificate request PEM block",
-				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
-						"status",
-						gen.DefaultTestNamespace,
-						gen.CertificateRequestFrom(baseCR,
-							gen.SetCertificateRequestCSR([]byte("bad csr")),
-							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
-								Type:               cmapi.CertificateRequestConditionReady,
-								Status:             cmmeta.ConditionFalse,
-								Reason:             "Failed",
-								Message:            "Resource validation failed: spec.request: Invalid value: []byte{0x62, 0x61, 0x64, 0x20, 0x63, 0x73, 0x72}: failed to decode csr: error decoding certificate request PEM block",
-								LastTransitionTime: &nowMetaTime,
-							}),
-							gen.SetCertificateRequestFailureTime(nowMetaTime),
-						),
-					)),
-				},
 			},
 		},
 		"if the Certificate is already set in the status then return nil and no-op, regardless of condition": {
@@ -563,7 +764,7 @@ func runTest(t *testing.T, test testT) {
 		}
 	}
 
-	c := New(util.IssuerSelfSigned, test.issuerImpl)
+	c := New(util.IssuerSelfSigned, func(*controller.Context) Issuer { return test.issuerImpl })
 	c.Register(test.builder.Context)
 
 	if test.helper != nil {

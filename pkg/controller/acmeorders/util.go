@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,19 +18,17 @@ package acmeorders
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"hash/fnv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/jetstack/cert-manager/pkg/acme"
-	acmecl "github.com/jetstack/cert-manager/pkg/acme/client"
-	"github.com/jetstack/cert-manager/pkg/api/util"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	"github.com/jetstack/cert-manager/pkg/controller/acmeorders/selectors"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/acme"
+	acmecl "github.com/cert-manager/cert-manager/pkg/acme/client"
+	"github.com/cert-manager/cert-manager/pkg/api/util"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller/acmeorders/selectors"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 var (
@@ -75,25 +73,9 @@ func buildChallenge(ctx context.Context, cl acmecl.Interface, issuer cmapi.Gener
 			Name:            chName,
 			Namespace:       o.Namespace,
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(o, orderGvk)},
-			Finalizers:      []string{cmacme.ACMEFinalizer},
 		},
 		Spec: *chSpec,
 	}, nil
-}
-
-func hashChallenge(spec cmacme.ChallengeSpec) (uint32, error) {
-	specBytes, err := json.Marshal(spec)
-	if err != nil {
-		return 0, err
-	}
-
-	hashF := fnv.New32()
-	_, err = hashF.Write(specBytes)
-	if err != nil {
-		return 0, err
-	}
-
-	return hashF.Sum32(), nil
 }
 
 func challengeSpecForAuthorization(ctx context.Context, cl acmecl.Interface, issuer cmapi.GenericIssuer, o *cmacme.Order, authz cmacme.ACMEAuthorization) (*cmacme.ChallengeSpec, error) {
@@ -177,7 +159,7 @@ func challengeSpecForAuthorization(ctx context.Context, cl acmecl.Interface, iss
 		dbg.Info("determining whether this match is more significant than last")
 
 		// because we don't count multiple dnsName matches as extra 'weight'
-		// in the selection process, we normalise the numDNSNamesMatch vars
+		// in the selection process, we normalize the numDNSNamesMatch vars
 		// to be either 1 or 0 (i.e. true or false)
 		selectedHasMatchingDNSNames := selectedNumDNSNamesMatch > 0
 		hasMatchingDNSNames := numDNSNamesMatch > 0

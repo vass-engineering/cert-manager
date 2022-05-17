@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,11 +27,11 @@ import (
 	"github.com/spf13/cobra/doc"
 	"github.com/spf13/pflag"
 
-	acmesolvercmd "github.com/jetstack/cert-manager/cmd/acmesolver/app"
-	cainjectorapp "github.com/jetstack/cert-manager/cmd/cainjector/app"
-	controllerapp "github.com/jetstack/cert-manager/cmd/controller/app"
-	ctlcmd "github.com/jetstack/cert-manager/cmd/ctl/cmd"
-	webhookcmd "github.com/jetstack/cert-manager/cmd/webhook/app"
+	acmesolvercmd "github.com/cert-manager/cert-manager/cmd/acmesolver/app"
+	cainjectorapp "github.com/cert-manager/cert-manager/cmd/cainjector/app"
+	controllerapp "github.com/cert-manager/cert-manager/cmd/controller/app"
+	ctlcmd "github.com/cert-manager/cert-manager/cmd/ctl/cmd"
+	webhookcmd "github.com/cert-manager/cert-manager/cmd/webhook/app"
 )
 
 func main() {

@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,25 +25,30 @@ import (
 
 	acmeapi "golang.org/x/crypto/acme"
 
-	acmecl "github.com/jetstack/cert-manager/pkg/acme/client"
-	acmeutil "github.com/jetstack/cert-manager/pkg/acme/util"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	"github.com/jetstack/cert-manager/pkg/metrics"
-	"github.com/jetstack/cert-manager/pkg/util"
+	acmecl "github.com/cert-manager/cert-manager/pkg/acme/client"
+	"github.com/cert-manager/cert-manager/pkg/acme/client/middleware"
+	acmeutil "github.com/cert-manager/cert-manager/pkg/acme/util"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
 )
 
-// NewClient will return a new ACME client.
-func NewClient(client *http.Client, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey) acmecl.Interface {
-	return &acmeapi.Client{
+// NewClientFunc is a function type for building a new ACME client.
+type NewClientFunc func(*http.Client, cmacme.ACMEIssuer, *rsa.PrivateKey, string) acmecl.Interface
+
+var _ NewClientFunc = NewClient
+
+// NewClient is an implementation of NewClientFunc that returns a real ACME client.
+func NewClient(client *http.Client, config cmacme.ACMEIssuer, privateKey *rsa.PrivateKey, userAgent string) acmecl.Interface {
+	return middleware.NewLogger(&acmeapi.Client{
 		Key:          privateKey,
 		HTTPClient:   client,
 		DirectoryURL: config.Server,
-		UserAgent:    util.CertManagerUserAgent,
+		UserAgent:    userAgent,
 		RetryBackoff: acmeutil.RetryBackoff,
-	}
+	})
 }
 
-// BuildHTTPClient returns a instramented HTTP client to be used by the ACME
+// BuildHTTPClient returns a instrumented HTTP client to be used by the ACME
 // client.
 // For the time being, we construct a new HTTP client on each invocation.
 // This is because we need to set the 'skipTLSVerify' flag on the HTTP client

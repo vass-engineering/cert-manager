@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,23 +25,36 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	"github.com/jetstack/cert-manager/test/e2e/framework/addon"
-	vaultaddon "github.com/jetstack/cert-manager/test/e2e/framework/addon/vault"
-	"github.com/jetstack/cert-manager/test/e2e/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/addon"
+	vaultaddon "github.com/cert-manager/cert-manager/test/e2e/framework/addon/vault"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/helper/featureset"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/helper/validation"
+	"github.com/cert-manager/cert-manager/test/e2e/util"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
-var _ = framework.CertManagerDescribe("Vault Issuer Certificate (AppRole with a custom mount path)", func() {
-	runVaultCustomAppRoleTests(cmapi.IssuerKind)
+var _ = framework.CertManagerDescribe("Vault Issuer Certificate (AppRole with a custom mount path, CA without root)", func() {
+	fs := featureset.NewFeatureSet(featureset.SaveRootCAToSecret)
+	runVaultCustomAppRoleTests(cmapi.IssuerKind, false, fs)
 })
 
-var _ = framework.CertManagerDescribe("Vault ClusterIssuer Certificate (AppRole with a custom mount path)", func() {
-	runVaultCustomAppRoleTests(cmapi.ClusterIssuerKind)
+var _ = framework.CertManagerDescribe("Vault Issuer Certificate (AppRole with a custom mount path, CA with root)", func() {
+	fs := featureset.NewFeatureSet()
+	runVaultCustomAppRoleTests(cmapi.IssuerKind, true, fs)
+})
+var _ = framework.CertManagerDescribe("Vault ClusterIssuer Certificate (AppRole with a custom mount path, CA without root)", func() {
+	fs := featureset.NewFeatureSet(featureset.SaveRootCAToSecret)
+	runVaultCustomAppRoleTests(cmapi.ClusterIssuerKind, false, fs)
+})
+var _ = framework.CertManagerDescribe("Vault ClusterIssuer Certificate (AppRole with a custom mount path, CA with root)", func() {
+	fs := featureset.NewFeatureSet()
+	runVaultCustomAppRoleTests(cmapi.ClusterIssuerKind, true, fs)
 })
 
-func runVaultCustomAppRoleTests(issuerKind string) {
+func runVaultCustomAppRoleTests(issuerKind string, testWithRoot bool, unsupportedFeatures featureset.FeatureSet) {
 	f := framework.NewDefaultFramework("create-vault-certificate")
 
 	var (
@@ -82,6 +95,7 @@ func runVaultCustomAppRoleTests(issuerKind string) {
 			Details:           *vault.Details(),
 			RootMount:         rootMount,
 			IntermediateMount: intermediateMount,
+			ConfigureWithRoot: testWithRoot,
 			Role:              role,
 			AppRoleAuthPath:   authPath,
 		}
@@ -118,12 +132,23 @@ func runVaultCustomAppRoleTests(issuerKind string) {
 
 		var err error
 		if issuerKind == cmapi.IssuerKind {
-			iss, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), util.NewCertManagerVaultIssuerAppRole("test-vault-issuer-", vaultURL, vaultPath, roleId, vaultSecretName, authPath, vault.Details().VaultCA), metav1.CreateOptions{})
+			vaultIssuer := gen.IssuerWithRandomName("test-vault-issuer-",
+				gen.SetIssuerNamespace(f.Namespace.Name),
+				gen.SetIssuerVaultURL(vaultURL),
+				gen.SetIssuerVaultPath(vaultPath),
+				gen.SetIssuerVaultCABundle(vault.Details().VaultCA),
+				gen.SetIssuerVaultAppRoleAuth("secretkey", vaultSecretName, roleId, authPath))
+			iss, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), vaultIssuer, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())
 
 			vaultIssuerName = iss.Name
 		} else {
-			iss, err := f.CertManagerClientSet.CertmanagerV1().ClusterIssuers().Create(context.TODO(), util.NewCertManagerVaultClusterIssuerAppRole("test-vault-issuer-", vaultURL, vaultPath, roleId, vaultSecretName, authPath, vault.Details().VaultCA), metav1.CreateOptions{})
+			vaultIssuer := gen.ClusterIssuerWithRandomName("test-vault-issuer-",
+				gen.SetIssuerVaultURL(vaultURL),
+				gen.SetIssuerVaultPath(vaultPath),
+				gen.SetIssuerVaultCABundle(vault.Details().VaultCA),
+				gen.SetIssuerVaultAppRoleAuth("secretkey", vaultSecretName, roleId, authPath))
+			iss, err := f.CertManagerClientSet.CertmanagerV1().ClusterIssuers().Create(context.TODO(), vaultIssuer, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())
 
 			vaultIssuerName = iss.Name
@@ -149,15 +174,15 @@ func runVaultCustomAppRoleTests(issuerKind string) {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Creating a Certificate")
-		_, err = certClient.Create(context.TODO(), util.NewCertManagerVaultCertificate(certificateName, certificateSecretName, vaultIssuerName, issuerKind, nil, nil), metav1.CreateOptions{})
+		cert, err := certClient.Create(context.TODO(), util.NewCertManagerVaultCertificate(certificateName, certificateSecretName, vaultIssuerName, issuerKind, nil, nil), metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Waiting for the Certificate to be issued...")
-		err = f.Helper().WaitCertificateIssued(f.Namespace.Name, certificateName, time.Minute*5)
+		cert, err = f.Helper().WaitForCertificateReadyAndDoneIssuing(cert, time.Minute*5)
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Validating the issued Certificate...")
-		err = f.Helper().ValidateCertificate(f.Namespace.Name, certificateName)
+		err = f.Helper().ValidateCertificate(cert, validation.CertificateSetForUnsupportedFeatureSet(unsupportedFeatures)...)
 		Expect(err).NotTo(HaveOccurred())
 	})
 }

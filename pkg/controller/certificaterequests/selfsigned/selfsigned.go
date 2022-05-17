@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,23 +23,26 @@ import (
 	"errors"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/record"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificaterequests"
-	crutil "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/util"
-	"github.com/jetstack/cert-manager/pkg/issuer"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	cmerrors "github.com/jetstack/cert-manager/pkg/util/errors"
-	"github.com/jetstack/cert-manager/pkg/util/kube"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
+	crutil "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/util"
+	"github.com/cert-manager/cert-manager/pkg/issuer"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	cmerrors "github.com/cert-manager/cert-manager/pkg/util/errors"
+	"github.com/cert-manager/cert-manager/pkg/util/kube"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 const (
 	CRControllerName = "certificaterequests-issuer-selfsigned"
+	emptyDNMessage   = "Certificate will be issued with an empty Issuer DN, which contravenes RFC 5280 and could break some strict clients"
 )
 
 type signingFn func(*x509.Certificate, *x509.Certificate, crypto.PublicKey, interface{}) ([]byte, *x509.Certificate, error)
@@ -49,6 +52,7 @@ type SelfSigned struct {
 	secretsLister corelisters.SecretLister
 
 	reporter *crutil.Reporter
+	recorder record.EventRecorder
 
 	// Used for testing to get reproducible resulting certificates
 	signingFn signingFn
@@ -56,18 +60,19 @@ type SelfSigned struct {
 
 func init() {
 	// create certificate request controller for selfsigned issuer
-	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		return controllerpkg.NewBuilder(ctx, CRControllerName).
-			For(certificaterequests.New(apiutil.IssuerSelfSigned, NewSelfSigned(ctx))).
+			For(certificaterequests.New(apiutil.IssuerSelfSigned, NewSelfSigned)).
 			Complete()
 	})
 }
 
-func NewSelfSigned(ctx *controllerpkg.Context) *SelfSigned {
+func NewSelfSigned(ctx *controllerpkg.Context) certificaterequests.Issuer {
 	return &SelfSigned{
 		issuerOptions: ctx.IssuerOptions,
 		secretsLister: ctx.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
 		reporter:      crutil.NewReporter(ctx.Clock, ctx.Recorder),
+		recorder:      ctx.Recorder,
 		signingFn:     pki.SignCertificate,
 	}
 }
@@ -126,6 +131,15 @@ func (s *SelfSigned) Sign(ctx context.Context, cr *cmapi.CertificateRequest, iss
 	}
 
 	template.CRLDistributionPoints = issuerObj.GetSpec().SelfSigned.CRLDistributionPoints
+
+	if template.Subject.String() == "" {
+		// RFC 5280 (https://tools.ietf.org/html/rfc5280#section-4.1.2.4) says that:
+		// "The issuer field MUST contain a non-empty distinguished name (DN)."
+		// Since we're creating a self-signed cert, the issuer will match whatever is
+		// in the template's subject DN.
+		log.V(logf.DebugLevel).Info("issued cert will have an empty issuer DN, which contravenes RFC 5280. emitting warning event")
+		s.recorder.Event(cr, corev1.EventTypeWarning, "BadConfig", emptyDNMessage)
+	}
 
 	// extract the public component of the key
 	publickey, err := pki.PublicKeyForPrivateKey(privatekey)

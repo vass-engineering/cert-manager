@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,5 +28,8 @@ func addDefaultingFuncs(scheme *runtime.Scheme) error {
 func SetDefaults_TestType(obj *TestType) {
 	if obj.TestFieldPtrAlt == nil {
 		obj.TestFieldPtrAlt = pointer.StringPtr("teststr")
+	}
+	if obj.TestDefaultingField == "" {
+		obj.TestDefaultingField = "set-in-v2"
 	}
 }

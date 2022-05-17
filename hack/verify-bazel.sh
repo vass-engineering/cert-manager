@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2019 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,9 +43,9 @@ export GO111MODULE=on
 # By not setting up the go tool in the bazel test environment at all, we still
 # get a confusing error message, but we fail fast and it is clear that
 # something is wrong:
-#    gazelle: finding module path for import github.com/jetstack/cert-manager/test/unit/gen: exit status 1: build cache is required, but could not be located: GOCACHE is not defined and $HOME is not defined
+#    gazelle: finding module path for import github.com/cert-manager/cert-manager/test/unit/gen: exit status 1: build cache is required, but could not be located: GOCACHE is not defined and $HOME is not defined
 echo "Running gazelle..."
-gazelle_diff=$("$gazelle" fix --mode=diff --external=external || true)
+gazelle_diff=$("$gazelle" fix --go_naming_convention=go_default_library --mode=diff --external=external || true)
 echo "Running kazel..."
 kazel_diff=$("$kazel" --dry-run --print-diff --cfg-path=./hack/build/.kazelcfg.json)
 

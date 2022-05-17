@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,21 +23,22 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	"github.com/jetstack/cert-manager/cmd/controller/app/options"
-	_ "github.com/jetstack/cert-manager/pkg/controller/acmechallenges"
-	_ "github.com/jetstack/cert-manager/pkg/controller/acmeorders"
-	_ "github.com/jetstack/cert-manager/pkg/controller/certificates/trigger"
-	_ "github.com/jetstack/cert-manager/pkg/controller/clusterissuers"
-	_ "github.com/jetstack/cert-manager/pkg/controller/ingress-shim"
-	_ "github.com/jetstack/cert-manager/pkg/controller/issuers"
-	_ "github.com/jetstack/cert-manager/pkg/issuer/acme"
-	_ "github.com/jetstack/cert-manager/pkg/issuer/ca"
-	_ "github.com/jetstack/cert-manager/pkg/issuer/selfsigned"
-	_ "github.com/jetstack/cert-manager/pkg/issuer/vault"
-	_ "github.com/jetstack/cert-manager/pkg/issuer/venafi"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/util"
-	utilfeature "github.com/jetstack/cert-manager/pkg/util/feature"
+	"github.com/cert-manager/cert-manager/cmd/controller/app/options"
+	_ "github.com/cert-manager/cert-manager/pkg/controller/acmechallenges"
+	_ "github.com/cert-manager/cert-manager/pkg/controller/acmeorders"
+	_ "github.com/cert-manager/cert-manager/pkg/controller/certificate-shim/gateways"
+	_ "github.com/cert-manager/cert-manager/pkg/controller/certificate-shim/ingresses"
+	_ "github.com/cert-manager/cert-manager/pkg/controller/certificates/trigger"
+	_ "github.com/cert-manager/cert-manager/pkg/controller/clusterissuers"
+	_ "github.com/cert-manager/cert-manager/pkg/controller/issuers"
+	_ "github.com/cert-manager/cert-manager/pkg/issuer/acme"
+	_ "github.com/cert-manager/cert-manager/pkg/issuer/ca"
+	_ "github.com/cert-manager/cert-manager/pkg/issuer/selfsigned"
+	_ "github.com/cert-manager/cert-manager/pkg/issuer/vault"
+	_ "github.com/cert-manager/cert-manager/pkg/issuer/venafi"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 )
 
 type CertManagerControllerOptions struct {
@@ -72,9 +73,14 @@ to renew certificates at an appropriate time before expiry.`,
 			}
 
 			logf.Log.V(logf.InfoLevel).Info("starting controller", "version", util.AppVersion, "git-commit", util.AppGitCommit)
-			o.RunCertManagerController(stopCh)
+			if err := o.RunCertManagerController(stopCh); err != nil {
+				cmd.SilenceUsage = true // Don't display usage information when exiting because of an error
+				return err
+			}
+
 			return nil
 		},
+		SilenceErrors: true, // Errors are already logged when calling cmd.Execute()
 	}
 
 	flags := cmd.Flags()
@@ -90,6 +96,6 @@ func (o CertManagerControllerOptions) Validate(args []string) error {
 	return utilerrors.NewAggregate(errors)
 }
 
-func (o CertManagerControllerOptions) RunCertManagerController(stopCh <-chan struct{}) {
-	Run(o.ControllerOptions, stopCh)
+func (o CertManagerControllerOptions) RunCertManagerController(stopCh <-chan struct{}) error {
+	return Run(o.ControllerOptions, stopCh)
 }

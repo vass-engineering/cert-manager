@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2019 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -63,3 +63,20 @@ if [[ -n "${diff}" ]]; then
   exit 1
 fi
 echo "SUCCESS: generated CRDs up-to-date"
+
+# Verify that CRDs don't contain status fields as that causes issues when they
+# are managed by some CD tools. This check is necessary because currently
+# controller-gen adds a status field that needs to be removed manually.
+# See https://github.com/cert-manager/cert-manager/pull/4379 for context
+crdPath="${tmpfiles}/deploy/crds"
+yq=$(realpath "$4")
+
+echo "Verifying that CRDs don't contain .status fields..."
+for file in ${crdPath}/*.yaml; do
+  name=$($yq e '.metadata.name' $file)
+  echo "Verifying that the CRD for $name does not contain a status field"
+  # Exit 1 if status is non-null
+  $yq e --exit-status=1 '.status==null' $file
+done
+
+echo "SUCCESS: generated CRDs don't contain any status fields"

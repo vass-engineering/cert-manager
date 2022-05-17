@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,15 +16,15 @@ limitations under the License.
 
 // Package webhook provides a library that can be used to build external ACME
 // solver webhooks.
-
 package webhook
 
 import (
 	restclient "k8s.io/client-go/rest"
 
-	whapi "github.com/jetstack/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
+	whapi "github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 )
 
+// Solver has the functionality to solve ACME challenges.
 type Solver interface {
 	// Name is the name of this ACME solver as part of the API group.
 	// This must match what you configure in the ACME Issuer's DNS01 config.

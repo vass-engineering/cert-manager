@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,24 +18,25 @@ package main
 
 import (
 	"flag"
-	"os"
 
-	"github.com/jetstack/cert-manager/cmd/webhook/app"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	utilcmd "github.com/jetstack/cert-manager/pkg/util/cmd"
+	"github.com/cert-manager/cert-manager/cmd/util"
+	"github.com/cert-manager/cert-manager/cmd/webhook/app"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 func main() {
+	stopCh, exit := util.SetupExitHandler(util.GracefulShutdown)
+	defer exit() // This function might call os.Exit, so defer last
+
 	logf.InitLogs(flag.CommandLine)
 	defer logf.FlushLogs()
 
-	stopCh := utilcmd.SetupSignalHandler()
 	cmd := app.NewServerCommand(stopCh)
 	cmd.Flags().AddGoFlagSet(flag.CommandLine)
 
 	flag.CommandLine.Parse([]string{})
 	if err := cmd.Execute(); err != nil {
 		logf.Log.Error(err, "error executing command")
-		os.Exit(1)
+		util.SetExitCode(err)
 	}
 }

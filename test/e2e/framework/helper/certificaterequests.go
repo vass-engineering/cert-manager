@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/x509"
 	"fmt"
@@ -28,22 +29,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/e2e/framework/log"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
 )
 
 // WaitForCertificateRequestReady waits for the CertificateRequest resource to
 // enter a Ready state.
 func (h *Helper) WaitForCertificateRequestReady(ns, name string, timeout time.Duration) (*cmapi.CertificateRequest, error) {
 	var cr *cmapi.CertificateRequest
+	logf, done := log.LogBackoff()
+	defer done()
 	err := wait.PollImmediate(time.Second, timeout,
 		func() (bool, error) {
 			var err error
-			log.Logf("Waiting for CertificateRequest %s to be ready", name)
+			logf("Waiting for CertificateRequest %s to be ready", name)
 			cr, err = h.CMClient.CertmanagerV1().CertificateRequests(ns).Get(context.TODO(), name, metav1.GetOptions{})
 			if err != nil {
 				return false, fmt.Errorf("error getting CertificateRequest %s: %v", name, err)
@@ -53,7 +56,7 @@ func (h *Helper) WaitForCertificateRequestReady(ns, name string, timeout time.Du
 				Status: cmmeta.ConditionTrue,
 			})
 			if !isReady {
-				log.Logf("Expected CertificateRequest to have Ready condition 'true' but it has: %v", cr.Status.Conditions)
+				logf("Expected CertificateRequest to have Ready condition 'true' but it has: %v", cr.Status.Conditions)
 				return false, nil
 			}
 			return true, nil
@@ -88,6 +91,11 @@ func (h *Helper) ValidateIssuedCertificateRequest(cr *cmapi.CertificateRequest, 
 		_, ok := key.(*ecdsa.PrivateKey)
 		if !ok {
 			return nil, fmt.Errorf("Expected private key of type ECDSA, but it was: %T", key)
+		}
+	case x509.Ed25519:
+		_, ok := key.(ed25519.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("Expected private key of type Ed25519, but it was: %T", key)
 		}
 	default:
 		return nil, fmt.Errorf("unrecognised requested private key algorithm %q", csr.PublicKeyAlgorithm)
@@ -142,6 +150,8 @@ func (h *Helper) ValidateIssuedCertificateRequest(cr *cmapi.CertificateRequest, 
 		keyAlg = cmapi.RSAKeyAlgorithm
 	case x509.ECDSA:
 		keyAlg = cmapi.ECDSAKeyAlgorithm
+	case x509.Ed25519:
+		keyAlg = cmapi.Ed25519KeyAlgorithm
 	default:
 		return nil, fmt.Errorf("unsupported key algorithm type: %s", csr.PublicKeyAlgorithm)
 	}
@@ -184,6 +194,13 @@ func (h *Helper) ValidateIssuedCertificateRequest(cr *cmapi.CertificateRequest, 
 		if _, err := cert.Verify(opts); err != nil {
 			return nil, err
 		}
+	}
+
+	if !apiutil.CertificateRequestIsApproved(cr) {
+		return nil, fmt.Errorf("CertificateRequest does not have an Approved condition set to True: %+v", cr.Status.Conditions)
+	}
+	if apiutil.CertificateRequestIsDenied(cr) {
+		return nil, fmt.Errorf("CertificateRequest has a Denied conditon set to True: %+v", cr.Status.Conditions)
 	}
 
 	return cert, nil

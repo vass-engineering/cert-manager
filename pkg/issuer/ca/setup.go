@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,11 +21,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/util/kube"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util/kube"
 )
 
 const (
@@ -34,12 +34,12 @@ const (
 
 	successKeyPairVerified = "KeyPairVerified"
 
-	messageErrorGetKeyPair     = "Error getting keypair for CA issuer: "
-	messageErrorInvalidKeyPair = "Invalid signing key pair: "
+	messageErrorGetKeyPair = "Error getting keypair for CA issuer: "
 
 	messageKeyPairVerified = "Signing CA verified"
 )
 
+// Setup verifies signing CA.
 func (c *CA) Setup(ctx context.Context) error {
 	log := logf.FromContext(ctx, "setup")
 
@@ -48,7 +48,7 @@ func (c *CA) Setup(ctx context.Context) error {
 		log.Error(err, "error getting signing CA TLS certificate")
 		s := messageErrorGetKeyPair + err.Error()
 		c.Recorder.Event(c.issuer, corev1.EventTypeWarning, errorGetKeyPair, s)
-		apiutil.SetIssuerCondition(c.issuer, v1.IssuerConditionReady, cmmeta.ConditionFalse, errorGetKeyPair, s)
+		apiutil.SetIssuerCondition(c.issuer, c.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorGetKeyPair, s)
 		return err
 	}
 
@@ -57,7 +57,7 @@ func (c *CA) Setup(ctx context.Context) error {
 		log.Error(err, "error getting signing CA private key")
 		s := messageErrorGetKeyPair + err.Error()
 		c.Recorder.Event(c.issuer, corev1.EventTypeWarning, errorGetKeyPair, s)
-		apiutil.SetIssuerCondition(c.issuer, v1.IssuerConditionReady, cmmeta.ConditionFalse, errorGetKeyPair, s)
+		apiutil.SetIssuerCondition(c.issuer, c.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorGetKeyPair, s)
 		return err
 	}
 
@@ -66,14 +66,14 @@ func (c *CA) Setup(ctx context.Context) error {
 		s := messageErrorGetKeyPair + "certificate is not a CA"
 		log.Error(nil, "signing certificate is not a CA")
 		c.Recorder.Event(c.issuer, corev1.EventTypeWarning, errorInvalidKeyPair, s)
-		apiutil.SetIssuerCondition(c.issuer, v1.IssuerConditionReady, cmmeta.ConditionFalse, errorInvalidKeyPair, s)
+		apiutil.SetIssuerCondition(c.issuer, c.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorInvalidKeyPair, s)
 		// Don't return an error here as there is nothing more we can do
 		return nil
 	}
 
 	log.V(logf.DebugLevel).Info("signing CA verified")
 	c.Recorder.Event(c.issuer, corev1.EventTypeNormal, successKeyPairVerified, messageKeyPairVerified)
-	apiutil.SetIssuerCondition(c.issuer, v1.IssuerConditionReady, cmmeta.ConditionTrue, successKeyPairVerified, messageKeyPairVerified)
+	apiutil.SetIssuerCondition(c.issuer, c.issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionTrue, successKeyPairVerified, messageKeyPairVerified)
 
 	return nil
 }

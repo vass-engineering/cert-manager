@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,8 +22,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 )
 
 type CertificateModifier func(*v1.Certificate)
@@ -74,6 +74,12 @@ func SetCertificateIPs(ips ...string) CertificateModifier {
 	}
 }
 
+func SetCertificateEmails(emails ...string) CertificateModifier {
+	return func(crt *v1.Certificate) {
+		crt.Spec.EmailAddresses = emails
+	}
+}
+
 func SetCertificateURIs(uris ...string) CertificateModifier {
 	return func(crt *v1.Certificate) {
 		crt.Spec.URIs = uris
@@ -107,6 +113,16 @@ func SetCertificateKeyEncoding(keyEncoding v1.PrivateKeyEncoding) CertificateMod
 func SetCertificateSecretName(secretName string) CertificateModifier {
 	return func(crt *v1.Certificate) {
 		crt.Spec.SecretName = secretName
+	}
+}
+
+// SetCertificateSecretTemplate sets annotations and labels to be attached to the secret metadata.
+func SetCertificateSecretTemplate(annotations, labels map[string]string) CertificateModifier {
+	return func(crt *v1.Certificate) {
+		crt.Spec.SecretTemplate = &v1.CertificateSecretTemplate{
+			Annotations: annotations,
+			Labels:      labels,
+		}
 	}
 }
 
@@ -149,6 +165,11 @@ func SetCertificateLastFailureTime(p metav1.Time) CertificateModifier {
 		crt.Status.LastFailureTime = &p
 	}
 }
+func SetCertificateIssuanceAttempts(ia *int) CertificateModifier {
+	return func(crt *v1.Certificate) {
+		crt.Status.FailedIssuanceAttempts = ia
+	}
+}
 
 func SetCertificateNotAfter(p metav1.Time) CertificateModifier {
 	return func(crt *v1.Certificate) {
@@ -162,7 +183,7 @@ func SetCertificateNotBefore(p metav1.Time) CertificateModifier {
 	}
 }
 
-func SetCertificateRenewalTIme(p metav1.Time) CertificateModifier {
+func SetCertificateRenewalTime(p metav1.Time) CertificateModifier {
 	return func(crt *v1.Certificate) {
 		crt.Status.RenewalTime = &p
 	}
@@ -198,6 +219,12 @@ func SetCertificateUID(uid types.UID) CertificateModifier {
 	}
 }
 
+func SetCertificateGeneration(gen int64) CertificateModifier {
+	return func(crt *v1.Certificate) {
+		crt.Generation = gen
+	}
+}
+
 func AddCertificateAnnotations(annotations map[string]string) CertificateModifier {
 	return func(crt *v1.Certificate) {
 		if crt.Annotations == nil {
@@ -218,5 +245,36 @@ func AddCertificateLabels(labels map[string]string) CertificateModifier {
 		for k, v := range labels {
 			crt.Labels[k] = v
 		}
+	}
+}
+
+// CertificateRef creates an owner reference for a certificate without having to
+// give the full certificate. Only use this function for testing purposes.
+//
+// Note that the only "important" field that must be filled in ownerReference
+// [1] is the UID. Most notably, the IsControlledBy function [2] only cares
+// about the UID. The apiVersion, kind and name are only used for information
+// purposes.
+//
+//  [1]: https://github.com/kubernetes/apimachinery/blob/10b3882/pkg/apis/meta/v1/types.go#L273-L275
+//  [2]: https://github.com/kubernetes/apimachinery/blob/10b3882/pkg/apis/meta/v1/controller_ref.go#L29
+func CertificateRef(certName, certUID string) metav1.OwnerReference {
+	return *metav1.NewControllerRef(
+		Certificate(certName,
+			SetCertificateUID(types.UID(certUID)),
+		),
+		v1.SchemeGroupVersion.WithKind("Certificate"),
+	)
+}
+
+func SetCertificateRevisionHistoryLimit(limit int32) CertificateModifier {
+	return func(crt *v1.Certificate) {
+		crt.Spec.RevisionHistoryLimit = &limit
+	}
+}
+
+func SetCertificateAdditionalOutputFormats(additionalOutputFormats ...v1.CertificateAdditionalOutputFormat) CertificateModifier {
+	return func(crt *v1.Certificate) {
+		crt.Spec.AdditionalOutputFormats = additionalOutputFormats
 	}
 }

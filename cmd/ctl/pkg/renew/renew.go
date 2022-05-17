@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,45 +26,41 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
-	restclient "k8s.io/client-go/rest"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	cmclient "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/build"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/factory"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
 )
 
 var (
 	long = templates.LongDesc(i18n.T(`
 Mark cert-manager Certificate resources for manual renewal.`))
 
-	example = templates.Examples(i18n.T(`
+	example = templates.Examples(i18n.T(build.WithTemplate(`
 # Renew the Certificates named 'my-app' and 'vault' in the current context namespace.
-kubectl cert-manager renew my-app vault
+{{.BuildName}} renew my-app vault
 
 # Renew all Certificates in the 'kube-system' namespace.
-kubectl cert-manager renew --namespace kube-system --all
+{{.BuildName}} renew --namespace kube-system --all
 
 # Renew all Certificates in all namespaces, provided those Certificates have the label 'app=my-service'
-kubectl cert-manager renew --all-namespaces -l app=my-service`))
+{{.BuildName}} renew --all-namespaces -l app=my-service`)))
 )
 
 // Options is a struct to support renew command
 type Options struct {
-	CMClient   cmclient.Interface
-	RESTConfig *restclient.Config
-
-	// The Namespace that the Certificate to be renewed resided in.
-	// This flag registration is handled by cmdutil.Factory
-	Namespace     string
 	LabelSelector string
 	All           bool
 	AllNamespaces bool
 
 	genericclioptions.IOStreams
+	*factory.Factory
 }
 
 // NewOptions returns initialized Options
@@ -75,23 +71,25 @@ func NewOptions(ioStreams genericclioptions.IOStreams) *Options {
 }
 
 // NewCmdRenew returns a cobra command for renewing Certificates
-func NewCmdRenew(ioStreams genericclioptions.IOStreams, factory cmdutil.Factory) *cobra.Command {
+func NewCmdRenew(ctx context.Context, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	o := NewOptions(ioStreams)
 	cmd := &cobra.Command{
-		Use:     "renew",
-		Short:   "Mark a Certificate for manual renewal",
-		Long:    long,
-		Example: example,
+		Use:               "renew",
+		Short:             "Mark a Certificate for manual renewal",
+		Long:              long,
+		Example:           example,
+		ValidArgsFunction: factory.ValidArgsListCertificates(ctx, &o.Factory),
 		Run: func(cmd *cobra.Command, args []string) {
-			cmdutil.CheckErr(o.Complete(factory))
 			cmdutil.CheckErr(o.Validate(cmd, args))
-			cmdutil.CheckErr(o.Run(args))
+			cmdutil.CheckErr(o.Run(ctx, args))
 		},
 	}
 
 	cmd.Flags().StringVarP(&o.LabelSelector, "selector", "l", o.LabelSelector, "Selector (label query) to filter on, supports '=', '==', and '!='.(e.g. -l key1=value1,key2=value2)")
 	cmd.Flags().BoolVarP(&o.AllNamespaces, "all-namespaces", "A", o.AllNamespaces, "If present, mark Certificates across namespaces for manual renewal. Namespace in current context is ignored even if specified with --namespace.")
 	cmd.Flags().BoolVar(&o.All, "all", o.All, "Renew all Certificates in the given Namespace, or all namespaces with --all-namespaces enabled.")
+
+	o.Factory = factory.New(ctx, cmd)
 
 	return cmd
 }
@@ -139,8 +137,7 @@ func (o *Options) Complete(f cmdutil.Factory) error {
 }
 
 // Run executes renew command
-func (o *Options) Run(args []string) error {
-	ctx := context.TODO()
+func (o *Options) Run(ctx context.Context, args []string) error {
 
 	nss := []corev1.Namespace{{ObjectMeta: metav1.ObjectMeta{Name: o.Namespace}}}
 
@@ -203,7 +200,7 @@ func (o *Options) Run(args []string) error {
 }
 
 func (o *Options) renewCertificate(ctx context.Context, crt *cmapi.Certificate) error {
-	apiutil.SetCertificateCondition(crt, cmapi.CertificateConditionIssuing, cmmeta.ConditionTrue, "ManuallyTriggered", "Certificate re-issuance manually triggered")
+	apiutil.SetCertificateCondition(crt, crt.Generation, cmapi.CertificateConditionIssuing, cmmeta.ConditionTrue, "ManuallyTriggered", "Certificate re-issuance manually triggered")
 	_, err := o.CMClient.CertmanagerV1().Certificates(crt.Namespace).UpdateStatus(ctx, crt, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to trigger issuance of Certificate %s/%s: %v", crt.Namespace, crt.Name, err)

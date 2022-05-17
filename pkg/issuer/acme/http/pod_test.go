@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	coretesting "k8s.io/client-go/testing"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 )
 
 func TestEnsurePod(t *testing.T) {
@@ -46,7 +46,7 @@ func TestEnsurePod(t *testing.T) {
 				},
 			},
 			PreFn: func(t *testing.T, s *solverFixture) {
-				ing, err := s.Solver.createPod(s.Challenge)
+				ing, err := s.Solver.createPod(context.TODO(), s.Challenge)
 				if err != nil {
 					t.Errorf("error preparing test: %v", err)
 				}
@@ -142,11 +142,11 @@ func TestEnsurePod(t *testing.T) {
 			},
 			Err: true,
 			PreFn: func(t *testing.T, s *solverFixture) {
-				_, err := s.Solver.createPod(s.Challenge)
+				_, err := s.Solver.createPod(context.TODO(), s.Challenge)
 				if err != nil {
 					t.Errorf("error preparing test: %v", err)
 				}
-				_, err = s.Solver.createPod(s.Challenge)
+				_, err = s.Solver.createPod(context.TODO(), s.Challenge)
 				if err != nil {
 					t.Errorf("error preparing test: %v", err)
 				}
@@ -196,7 +196,7 @@ func TestGetPodsForCertificate(t *testing.T) {
 				},
 			},
 			PreFn: func(t *testing.T, s *solverFixture) {
-				ing, err := s.Solver.createPod(s.Challenge)
+				ing, err := s.Solver.createPod(context.TODO(), s.Challenge)
 				if err != nil {
 					t.Errorf("error preparing test: %v", err)
 				}
@@ -231,7 +231,7 @@ func TestGetPodsForCertificate(t *testing.T) {
 			PreFn: func(t *testing.T, s *solverFixture) {
 				differentChallenge := s.Challenge.DeepCopy()
 				differentChallenge.Spec.DNSName = "notexample.com"
-				_, err := s.Solver.createPod(differentChallenge)
+				_, err := s.Solver.createPod(context.TODO(), differentChallenge)
 				if err != nil {
 					t.Errorf("error preparing test: %v", err)
 				}
@@ -317,7 +317,8 @@ func TestMergePodObjectMetaWithPodTemplate(t *testing.T) {
 					"foo":                     "bar",
 				}
 				resultingPod.Spec.NodeSelector = map[string]string{
-					"node": "selector",
+					"kubernetes.io/os": "linux",
+					"node":             "selector",
 				}
 				resultingPod.Spec.Tolerations = []corev1.Toleration{
 					{

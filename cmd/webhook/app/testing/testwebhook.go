@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,12 +17,13 @@ limitations under the License.
 package testing
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"math/big"
 	"net"
 	"os"
@@ -30,15 +31,16 @@ import (
 	"testing"
 	"time"
 
+	logtesting "github.com/go-logr/logr/testing"
 	"github.com/spf13/pflag"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/utils/pointer"
 
-	"github.com/jetstack/cert-manager/cmd/webhook/app"
-	"github.com/jetstack/cert-manager/cmd/webhook/app/options"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/cmd/webhook/app/options"
+	"github.com/cert-manager/cert-manager/internal/webhook"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/pkg/webhook/server"
 )
-
-var log = logf.Log.WithName("webhook-server-test")
 
 type StopFunc func()
 
@@ -54,20 +56,26 @@ type ServerOptions struct {
 	CAPEM []byte
 }
 
-func StartWebhookServer(t *testing.T, args []string) (ServerOptions, StopFunc) {
-	// Allow user to override options using flags
-	var opts options.WebhookOptions
+func StartWebhookServer(t *testing.T, ctx context.Context, args []string, argumentsForNewServerWithOptions ...func(*server.Server)) (ServerOptions, StopFunc) {
+	log := logtesting.NewTestLogger(t)
+
 	fs := pflag.NewFlagSet("testset", pflag.ExitOnError)
-	opts.AddFlags(fs)
+	webhookFlags := options.NewWebhookFlags()
+	webhookConfig, err := options.NewWebhookConfiguration()
+	if err != nil {
+		t.Fatalf("Failed building test webhook config: %v", err)
+	}
+	webhookFlags.AddFlags(fs)
+	options.AddConfigFlags(fs, webhookConfig)
 	// Parse the arguments passed in into the WebhookOptions struct
 	fs.Parse(args)
 
 	var caPEM []byte
-	tempDir, err := ioutil.TempDir("", "webhook-tls-")
+	tempDir, err := os.MkdirTemp("", "webhook-tls-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !options.FileTLSSourceEnabled(opts) && !options.DynamicTLSSourceEnabled(opts) {
+	if !webhookConfig.TLSConfig.FilesystemConfigProvided() && !webhookConfig.TLSConfig.DynamicConfigProvided() {
 		// Generate a CA and serving certificate
 		ca, certificatePEM, privateKeyPEM, err := generateTLSAssets()
 		if err != nil {
@@ -75,43 +83,48 @@ func StartWebhookServer(t *testing.T, args []string) (ServerOptions, StopFunc) {
 		}
 
 		caPEM = ca
-		if err := ioutil.WriteFile(filepath.Join(tempDir, "tls.crt"), certificatePEM, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(tempDir, "tls.crt"), certificatePEM, 0644); err != nil {
 			t.Fatal(err)
 		}
-		if err := ioutil.WriteFile(filepath.Join(tempDir, "tls.key"), privateKeyPEM, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(tempDir, "tls.key"), privateKeyPEM, 0644); err != nil {
 			t.Fatal(err)
 		}
 
-		opts.TLSKeyFile = filepath.Join(tempDir, "tls.key")
-		opts.TLSCertFile = filepath.Join(tempDir, "tls.crt")
+		webhookConfig.TLSConfig.Filesystem.KeyFile = filepath.Join(tempDir, "tls.key")
+		webhookConfig.TLSConfig.Filesystem.CertFile = filepath.Join(tempDir, "tls.crt")
 	}
 
 	// Listen on a random port number
-	opts.ListenPort = 0
-	opts.HealthzPort = 0
+	webhookConfig.SecurePort = pointer.Int(0)
+	webhookConfig.HealthzPort = pointer.Int(0)
 
-	stopCh := make(chan struct{})
-	srv, err := app.NewServerWithOptions(log, opts)
+	errCh := make(chan error)
+	srv, err := webhook.NewCertManagerWebhookServer(log, *webhookFlags, *webhookConfig, argumentsForNewServerWithOptions...)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
 	go func() {
-		if err := srv.Run(stopCh); err != nil {
-			t.Fatalf("error running webhook server: %v", err)
+		defer close(errCh)
+		if err := srv.Run(ctx); err != nil {
+			errCh <- fmt.Errorf("error running webhook server: %v", err)
 		}
 	}()
 
 	// Determine the random port number that was chosen
 	var listenPort int
-	for i := 0; i < 10; i++ {
+	if err = wait.PollImmediateUntil(100*time.Millisecond, func() (bool, error) {
 		listenPort, err = srv.Port()
 		if err != nil {
-			t.Logf("Waiting for ListenPort to be allocated (got error: %v)", err)
-			time.Sleep(time.Second)
-			continue
+			if errors.Is(err, server.ErrNotListening) {
+				return false, nil
+			}
+			return false, err
 		}
-		break
+		return true, nil
+	}, ctx.Done()); err != nil {
+		t.Fatalf("Failed waiting for ListenPort to be allocated (got error: %v)", err)
 	}
 
 	serverOpts := ServerOptions{
@@ -119,7 +132,11 @@ func StartWebhookServer(t *testing.T, args []string) (ServerOptions, StopFunc) {
 		CAPEM: caPEM,
 	}
 	return serverOpts, func() {
-		close(stopCh)
+		cancel()
+		err := <-errCh // Wait for shutdown
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := os.RemoveAll(tempDir); err != nil {
 			t.Fatal(err)
 		}

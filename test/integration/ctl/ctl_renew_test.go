@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,22 +26,23 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
-	"github.com/jetstack/cert-manager/cmd/ctl/pkg/renew"
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/test/integration/framework"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/factory"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/renew"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/test/integration/framework"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 // TestCtlRenew tests the renewal logic of the ctl CLI command against the
 // cert-manager Issuing controller.
 func TestCtlRenew(t *testing.T) {
-	config, stopFn := framework.RunControlPlane(t)
-	defer stopFn()
-
-	ctx, cancel := context.WithTimeout(context.TODO(), time.Second*20)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*40)
 	defer cancel()
+
+	config, stopFn := framework.RunControlPlane(t, ctx)
+	defer stopFn()
 
 	// Build clients
 	kubeClient, _, cmCl, _ := framework.NewClients(t, config)
@@ -163,16 +164,17 @@ func TestCtlRenew(t *testing.T) {
 
 			cmd := &renew.Options{
 				LabelSelector: test.inputLabels,
-				Namespace:     test.inputNamespace,
 				All:           test.inputAll,
 				AllNamespaces: test.inputAllNamespaces,
-
-				CMClient:   cmCl,
-				RESTConfig: config,
-				IOStreams:  streams,
+				Factory: &factory.Factory{
+					CMClient:   cmCl,
+					RESTConfig: config,
+					Namespace:  test.inputNamespace,
+				},
+				IOStreams: streams,
 			}
 
-			if err := cmd.Run(test.inputArgs); err != nil {
+			if err := cmd.Run(ctx, test.inputArgs); err != nil {
 				t.Fatal(err)
 			}
 

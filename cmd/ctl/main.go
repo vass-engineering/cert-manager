@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,18 +17,23 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
-	ctlcmd "github.com/jetstack/cert-manager/cmd/ctl/cmd"
-	utilcmd "github.com/jetstack/cert-manager/pkg/util/cmd"
+	ctlcmd "github.com/cert-manager/cert-manager/cmd/ctl/cmd"
+	"github.com/cert-manager/cert-manager/cmd/util"
 )
 
 func main() {
-	stopCh := utilcmd.SetupSignalHandler()
-	cmd := ctlcmd.NewCertManagerCtlCommand(os.Stdin, os.Stdout, os.Stderr, stopCh)
+	stopCh, exit := util.SetupExitHandler(util.AlwaysErrCode)
+	defer exit() // This function might call os.Exit, so defer last
+
+	ctx := util.ContextWithStopCh(context.Background(), stopCh)
+	cmd := ctlcmd.NewCertManagerCtlCommand(ctx, os.Stdin, os.Stdout, os.Stderr)
 
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", err)
+		util.SetExitCode(err)
 	}
 }

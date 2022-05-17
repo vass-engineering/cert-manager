@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,13 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package metrics contains global structures related to metrics collection
-// cert-manager exposes the following metrics:
-// certificate_expiration_timestamp_seconds{name, namespace}
-// certificate_ready_status{name, namespace, condition}
-// acme_client_request_count{"scheme", "host", "path", "method", "status"}
-// acme_client_request_duration_seconds{"scheme", "host", "path", "method", "status"}
-// controller_sync_call_count{"controller"}
 package metrics
 
 import (

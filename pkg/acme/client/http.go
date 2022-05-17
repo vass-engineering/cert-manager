@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jetstack/cert-manager/pkg/metrics"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
 )
 
 // This file implements a custom instrumented HTTP client round tripper that
@@ -69,7 +69,7 @@ func (it *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Remember the current time.
 	start := time.Now()
 
-	// Make the request using the wrappd RoundTripper.
+	// Make the request using the wrapped RoundTripper.
 	resp, err := it.wrappedRT.RoundTrip(req)
 	if resp != nil {
 		statusCode = resp.StatusCode

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,6 @@ limitations under the License.
 package vault
 
 import (
-	_ "github.com/jetstack/cert-manager/test/e2e/suite/issuers/vault/certificate"
-	_ "github.com/jetstack/cert-manager/test/e2e/suite/issuers/vault/certificaterequest"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/issuers/vault/certificate"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/issuers/vault/certificaterequest"
 )

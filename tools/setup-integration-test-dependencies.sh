@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2020 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ set -o pipefail
 SCRIPT_ROOT=$(realpath $(dirname "${BASH_SOURCE}"))
 REPO_ROOT=$(dirname "${SCRIPT_ROOT}}")
 
-bazel build //deploy/crds:crds.regular.yaml
+bazel build //deploy/crds:crds.yaml
 bazel build //hack/bin:com_coreos_etcd
 bazel build //hack/bin:io_kubernetes_kube-apiserver
 bazel build //hack/bin:kubectl

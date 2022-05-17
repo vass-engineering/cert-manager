@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,9 +26,10 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/utils/pointer"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 func podLabels(ch *cmacme.Challenge) map[string]string {
@@ -39,7 +40,7 @@ func podLabels(ch *cmacme.Challenge) map[string]string {
 		// TODO: we need to support domains longer than 63 characters
 		// this value should probably be hashed, and then the full plain text
 		// value stored as an annotation to make it easier for users to read
-		// see #425 for details: https://github.com/jetstack/cert-manager/issues/425
+		// see #425 for details: https://github.com/cert-manager/cert-manager/issues/425
 		cmacme.DomainLabelKey:               domainHash,
 		cmacme.TokenLabelKey:                tokenHash,
 		cmacme.SolverIdentificationLabelKey: solverIdent,
@@ -69,7 +70,7 @@ func (s *Solver) ensurePod(ctx context.Context, ch *cmacme.Challenge) (*corev1.P
 
 	log.V(logf.InfoLevel).Info("creating HTTP01 challenge solver pod")
 
-	return s.createPod(ch)
+	return s.createPod(ctx, ch)
 }
 
 // getPodsForChallenge returns a list of pods that were created to solve
@@ -117,7 +118,7 @@ func (s *Solver) cleanupPods(ctx context.Context, ch *cmacme.Challenge) error {
 		log := logf.WithRelatedResource(log, pod).V(logf.DebugLevel)
 		log.V(logf.InfoLevel).Info("deleting pod resource")
 
-		err := s.Client.CoreV1().Pods(pod.Namespace).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+		err := s.Client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
 		if err != nil {
 			log.V(logf.WarnLevel).Info("failed to delete pod resource", "error", err)
 			errs = append(errs, err)
@@ -131,9 +132,9 @@ func (s *Solver) cleanupPods(ctx context.Context, ch *cmacme.Challenge) error {
 
 // createPod will create a challenge solving pod for the given certificate,
 // domain, token and key.
-func (s *Solver) createPod(ch *cmacme.Challenge) (*corev1.Pod, error) {
+func (s *Solver) createPod(ctx context.Context, ch *cmacme.Challenge) (*corev1.Pod, error) {
 	return s.Client.CoreV1().Pods(ch.Namespace).Create(
-		context.TODO(),
+		ctx,
 		s.buildPod(ch),
 		metav1.CreateOptions{})
 }
@@ -144,10 +145,11 @@ func (s *Solver) buildPod(ch *cmacme.Challenge) *corev1.Pod {
 	pod := s.buildDefaultPod(ch)
 
 	// Override defaults if they have changed in the pod template.
-	if ch.Spec.Solver.HTTP01 != nil &&
-		ch.Spec.Solver.HTTP01.Ingress != nil {
-		pod = s.mergePodObjectMetaWithPodTemplate(pod,
-			ch.Spec.Solver.HTTP01.Ingress.PodTemplate)
+	if ch.Spec.Solver.HTTP01 != nil {
+		if ch.Spec.Solver.HTTP01.Ingress != nil {
+			pod = s.mergePodObjectMetaWithPodTemplate(pod,
+				ch.Spec.Solver.HTTP01.Ingress.PodTemplate)
+		}
 	}
 
 	return pod
@@ -167,7 +169,13 @@ func (s *Solver) buildDefaultPod(ch *cmacme.Challenge) *corev1.Pod {
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ch, challengeGvk)},
 		},
 		Spec: corev1.PodSpec{
+			NodeSelector: map[string]string{
+				"kubernetes.io/os": "linux",
+			},
 			RestartPolicy: corev1.RestartPolicyOnFailure,
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: pointer.BoolPtr(true),
+			},
 			Containers: []corev1.Container{
 				{
 					Name: "acmesolver",
@@ -196,6 +204,9 @@ func (s *Solver) buildDefaultPod(ch *cmacme.Challenge) *corev1.Pod {
 							Name:          "http",
 							ContainerPort: acmeSolverListenPort,
 						},
+					},
+					SecurityContext: &corev1.SecurityContext{
+						AllowPrivilegeEscalation: pointer.BoolPtr(false),
 					},
 				},
 			},
@@ -237,9 +248,7 @@ func (s *Solver) mergePodObjectMetaWithPodTemplate(pod *corev1.Pod, podTempl *cm
 		pod.Spec.Tolerations = []corev1.Toleration{}
 	}
 
-	for _, t := range podTempl.Spec.Tolerations {
-		pod.Spec.Tolerations = append(pod.Spec.Tolerations, t)
-	}
+	pod.Spec.Tolerations = append(pod.Spec.Tolerations, podTempl.Spec.Tolerations...)
 
 	if podTempl.Spec.Affinity != nil {
 		pod.Spec.Affinity = podTempl.Spec.Affinity

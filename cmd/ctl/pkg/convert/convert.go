@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,9 +17,11 @@ limitations under the License.
 package convert
 
 import (
+	"context"
 	"fmt"
 
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/build"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 
 	"github.com/spf13/cobra"
 	metainternalversion "k8s.io/apimachinery/pkg/apis/meta/internalversion"
@@ -34,16 +36,16 @@ import (
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/jetstack/cert-manager/pkg/ctl"
+	"github.com/cert-manager/cert-manager/pkg/ctl"
 )
 
 var (
-	example = templates.Examples(i18n.T(`
+	example = templates.Examples(i18n.T(build.WithTemplate(`
 		# Convert 'cert.yaml' to latest version and print to stdout.
-		kubectl cert-manager convert -f cert.yaml
+		{{.BuildName}} convert -f cert.yaml
 
 		# Convert kustomize overlay under current directory to 'cert-manager.io/v1alpha3'
-		kubectl cert-manager convert -k . --output-version cert-manager.io/v1alpha3`))
+		{{.BuildName}} convert -k . --output-version cert-manager.io/v1alpha3`)))
 
 	longDesc = templates.LongDesc(i18n.T(`
 Convert cert-manager config files between different API versions. Both YAML
@@ -83,7 +85,7 @@ func NewOptions(ioStreams genericclioptions.IOStreams) *Options {
 }
 
 // NewCmdConvert returns a cobra command for converting cert-manager resources
-func NewCmdConvert(ioStreams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdConvert(ctx context.Context, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	o := NewOptions(ioStreams)
 
 	cmd := &cobra.Command{

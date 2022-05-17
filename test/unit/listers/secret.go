@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,8 +38,8 @@ type FakeSecretNamespaceLister struct {
 	GetFn  func(name string) (ret *corev1.Secret, err error)
 }
 
-func NewFakeSecretLister() *FakeSecretLister {
-	return &FakeSecretLister{
+func NewFakeSecretLister(mods ...FakeSecretListerModifier) *FakeSecretLister {
+	return FakeSecretListerFrom(&FakeSecretLister{
 		ListFn: func(selector labels.Selector) (ret []*corev1.Secret, err error) {
 			return nil, nil
 		},
@@ -47,18 +47,18 @@ func NewFakeSecretLister() *FakeSecretLister {
 		SecretsFn: func(namespace string) clientcorev1.SecretNamespaceLister {
 			return nil
 		},
-	}
+	}, mods...)
 }
 
-func NewFakeSecretNamespaceLister() *FakeSecretNamespaceLister {
-	return &FakeSecretNamespaceLister{
+func NewFakeSecretNamespaceLister(mods ...FakeSecretNamespaceListerModifier) *FakeSecretNamespaceLister {
+	return FakeSecretNamespaceListerFrom(&FakeSecretNamespaceLister{
 		ListFn: func(selector labels.Selector) (ret []*corev1.Secret, err error) {
 			return nil, nil
 		},
 		GetFn: func(name string) (ret *corev1.Secret, err error) {
 			return nil, nil
 		},
-	}
+	}, mods...)
 }
 
 func (f *FakeSecretLister) List(selector labels.Selector) (ret []*corev1.Secret, err error) {

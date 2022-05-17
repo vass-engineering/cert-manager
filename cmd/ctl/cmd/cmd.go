@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -24,33 +25,23 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
-
-	// Load all auth plugins
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/klog/v2"
-	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 
-	"github.com/jetstack/cert-manager/cmd/ctl/pkg/convert"
-	"github.com/jetstack/cert-manager/cmd/ctl/pkg/create"
-	"github.com/jetstack/cert-manager/cmd/ctl/pkg/renew"
-	"github.com/jetstack/cert-manager/cmd/ctl/pkg/status"
-	"github.com/jetstack/cert-manager/cmd/ctl/pkg/version"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/build"
+	"github.com/cert-manager/cert-manager/cmd/ctl/pkg/build/commands"
 )
 
-func NewCertManagerCtlCommand(in io.Reader, out, err io.Writer, stopCh <-chan struct{}) *cobra.Command {
+func NewCertManagerCtlCommand(ctx context.Context, in io.Reader, out, err io.Writer) *cobra.Command {
 	cmds := &cobra.Command{
-		Use:   "cert-manager",
+		Use:   build.Name(),
 		Short: "cert-manager CLI tool to manage and configure cert-manager resources",
-		Long: `
-kubectl cert-manager is a CLI tool manage and configure cert-manager resources for Kubernetes`,
+		Long: build.WithTemplate(`
+{{.BuildName}} is a CLI tool manage and configure cert-manager resources for Kubernetes`),
+		CompletionOptions: cobra.CompletionOptions{
+			DisableDefaultCmd: true,
+		},
 	}
-	cmds.SetUsageTemplate(usageTemplate)
-
-	kubeConfigFlags := genericclioptions.NewConfigFlags(true)
-	kubeConfigFlags.AddFlags(cmds.PersistentFlags())
-	matchVersionKubeConfigFlags := cmdutil.NewMatchVersionFlags(kubeConfigFlags)
-	matchVersionKubeConfigFlags.AddFlags(cmds.PersistentFlags())
-	factory := cmdutil.NewFactory(matchVersionKubeConfigFlags)
+	cmds.SetUsageTemplate(usageTemplate())
 
 	cmds.Flags().AddGoFlagSet(flag.CommandLine)
 	flag.CommandLine.Parse([]string{})
@@ -62,18 +53,15 @@ kubectl cert-manager is a CLI tool manage and configure cert-manager resources f
 	}
 
 	ioStreams := genericclioptions.IOStreams{In: in, Out: out, ErrOut: err}
-	cmds.AddCommand(version.NewCmdVersion(ioStreams))
-	cmds.AddCommand(convert.NewCmdConvert(ioStreams))
-	cmds.AddCommand(create.NewCmdCreate(ioStreams, factory))
-	cmds.AddCommand(renew.NewCmdRenew(ioStreams, factory))
-	cmds.AddCommand(status.NewCmdStatus(ioStreams, factory))
+	for _, registerCmd := range commands.Commands() {
+		cmds.AddCommand(registerCmd(ctx, ioStreams))
+	}
 
 	return cmds
 }
 
-const usageTemplate = `Usage:{{if .Runnable}}
-  kubectl {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
-  kubectl {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
+func usageTemplate() string {
+	return fmt.Sprintf(`Usage:{{if .Runnable}} %s {{end}}{{if .HasAvailableSubCommands}} %s [command]{{end}}{{if gt (len .Aliases) 0}}
 
 Aliases:
   {{.NameAndAliases}}{{end}}{{if .HasExample}}
@@ -93,5 +81,6 @@ Global Flags:
 Additional help topics:{{range .Commands}}{{if .IsAdditionalHelpTopicCommand}}
   {{rpad .CommandPath .CommandPathPadding}} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableSubCommands}}
 
-Use "kubectl {{.CommandPath}} [command] --help" for more information about a command.{{end}}
-`
+Use "%s [command] --help" for more information about a command.{{end}}
+`, build.Name(), build.Name(), build.Name())
+}

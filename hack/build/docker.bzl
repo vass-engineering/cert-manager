@@ -1,4 +1,4 @@
-# Copyright 2019 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,9 @@ load("@io_bazel_rules_docker//container:bundle.bzl", "container_bundle")
 load("@io_bazel_rules_docker//go:image.bzl", "go_image")
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 
+
+# TODO: It seems like this code is never used, see https://github.com/cert-manager/cert-manager/issues/3072
+# It should be either removed or the work on it finished.
 def covered_image(name, component, **kwargs):
     native.genrule(
         name = "%s.covered-testfile" % name,
@@ -26,7 +29,7 @@ cat <<EOF > "$@"
 package main
 import (
   "testing"
-  "github.com/jetstack/cert-manager/pkg/util/coverage"
+  "github.com/cert-manager/cert-manager/pkg/util/coverage"
 )
 func TestMain(m *testing.M) {
   // Get coverage running

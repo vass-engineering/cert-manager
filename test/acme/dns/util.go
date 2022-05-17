@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,8 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	whapi "github.com/jetstack/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/util"
+	whapi "github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/util"
 )
 
 var (
@@ -60,7 +60,7 @@ func (f *fixture) setupNamespace(t *testing.T, name string) (string, func()) {
 				return nil
 			}
 
-			_, _, err = f.kubectl.Run("apply", "--namespace", name, "-f", path)
+			_, _, err = f.environment.ControlPlane.KubeCtl().Run("apply", "--namespace", name, "-f", path)
 			if err != nil {
 				return err
 			}
@@ -87,9 +87,8 @@ func (f *fixture) buildChallengeRequest(t *testing.T, ns string) *whapi.Challeng
 		ResolvedZone:            f.resolvedZone,
 		AllowAmbientCredentials: f.allowAmbientCredentials,
 		Config:                  f.jsonConfig,
-		// TODO
-		DNSName: "example.com",
-		Key:     "123d==",
+		DNSName:                 f.dnsName,
+		Key:                     f.dnsChallengeKey,
 	}
 }
 

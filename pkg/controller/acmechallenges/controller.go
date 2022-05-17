@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,22 +23,21 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/jetstack/cert-manager/pkg/acme/accounts"
-	cmclient "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
-	cmacmelisters "github.com/jetstack/cert-manager/pkg/client/listers/acme/v1"
-	cmlisters "github.com/jetstack/cert-manager/pkg/client/listers/certmanager/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/acmechallenges/scheduler"
-	"github.com/jetstack/cert-manager/pkg/issuer"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/http"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/internal/ingress"
+	"github.com/cert-manager/cert-manager/pkg/acme/accounts"
+	cmacmelisters "github.com/cert-manager/cert-manager/pkg/client/listers/acme/v1"
+	cmlisters "github.com/cert-manager/cert-manager/pkg/client/listers/certmanager/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/acmechallenges/scheduler"
+	"github.com/cert-manager/cert-manager/pkg/issuer"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/http"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 type controller struct {
@@ -66,8 +65,6 @@ type controller struct {
 
 	// used to record Events about resources to the API
 	recorder record.EventRecorder
-	// clientset used to update cert-manager API resources
-	cmClient cmclient.Interface
 
 	// maintain a reference to the workqueue for this controller
 	// so the handleOwnedResource method can enqueue resources
@@ -79,6 +76,10 @@ type controller struct {
 	dns01Nameservers []string
 
 	DNS01CheckRetryPeriod time.Duration
+
+	// objectUpdater implements the updateObject function which is used to save
+	// changes to the Challenge.Status and Challenge.Finalizers
+	objectUpdater
 }
 
 func (c *controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitingInterface, []cache.InformerSynced, error) {
@@ -96,7 +97,12 @@ func (c *controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitin
 	// cache when managing pod/service/ingress resources
 	podInformer := ctx.KubeSharedInformerFactory.Core().V1().Pods()
 	serviceInformer := ctx.KubeSharedInformerFactory.Core().V1().Services()
-	ingressInformer := ctx.KubeSharedInformerFactory.Extensions().V1beta1().Ingresses()
+
+	_, ingressInformer, err := ingress.NewListerInformer(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// build a list of InformerSynced functions that will be returned by the Register method.
 	// the controller will only begin processing items once all of these informers have synced.
 	mustSync := []cache.InformerSynced{
@@ -105,7 +111,12 @@ func (c *controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitin
 		secretInformer.Informer().HasSynced,
 		podInformer.Informer().HasSynced,
 		serviceInformer.Informer().HasSynced,
-		ingressInformer.Informer().HasSynced,
+		ingressInformer.HasSynced,
+	}
+
+	if ctx.GatewaySolverEnabled {
+		gwAPIHTTPRouteInformer := ctx.GWShared.Gateway().V1alpha2().HTTPRoutes()
+		mustSync = append(mustSync, gwAPIHTTPRouteInformer.Informer().HasSynced)
 	}
 
 	// set all the references to the listers for used by the Sync function
@@ -127,11 +138,12 @@ func (c *controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitin
 	c.helper = issuer.NewHelper(c.issuerLister, c.clusterIssuerLister)
 	c.scheduler = scheduler.New(logf.NewContext(ctx.RootContext, c.log), c.challengeLister, ctx.SchedulerOptions.MaxConcurrentChallenges)
 	c.recorder = ctx.Recorder
-	c.cmClient = ctx.CMClient
-	c.httpSolver = http.NewSolver(ctx)
 	c.accountRegistry = ctx.ACMEOptions.AccountRegistry
 
-	var err error
+	c.httpSolver, err = http.NewSolver(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	c.dnsSolver, err = dns.NewSolver(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -140,6 +152,10 @@ func (c *controller) Register(ctx *controllerpkg.Context) (workqueue.RateLimitin
 	// read options from context
 	c.dns01Nameservers = ctx.ACMEOptions.DNS01Nameservers
 	c.DNS01CheckRetryPeriod = ctx.ACMEOptions.DNS01CheckRetryPeriod
+
+	// Construct an objectUpdater which is used to save changes to the Challenge
+	// object, either using Update or using Patch + Server Side Apply.
+	c.objectUpdater = newObjectUpdater(ctx.CMClient, ctx.FieldManager)
 
 	return c.queue, mustSync, nil
 }
@@ -165,17 +181,14 @@ func (c *controller) runScheduler(ctx context.Context) {
 		return
 	}
 
-	for _, ch := range toSchedule {
-		log := logf.WithResource(log, ch)
-		ch = ch.DeepCopy()
+	for _, chOriginal := range toSchedule {
+		log := logf.WithResource(log, chOriginal)
+		ch := chOriginal.DeepCopy()
 		ch.Status.Processing = true
-
-		_, err := c.cmClient.AcmeV1().Challenges(ch.Namespace).UpdateStatus(context.TODO(), ch, metav1.UpdateOptions{})
-		if err != nil {
+		if err := c.updateObject(ctx, chOriginal, ch); err != nil {
 			log.Error(err, "error scheduling challenge for processing")
 			return
 		}
-
 		c.recorder.Event(ch, corev1.EventTypeNormal, "Started", "Challenge scheduled for processing")
 	}
 
@@ -212,7 +225,7 @@ const (
 )
 
 func init() {
-	controllerpkg.Register(ControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(ControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		c := &controller{}
 		return controllerpkg.NewBuilder(ctx, ControllerName).
 			For(c).

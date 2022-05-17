@@ -17,16 +17,20 @@ import (
 
 	"github.com/miekg/dns"
 
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 type preCheckDNSFunc func(fqdn, value string, nameservers []string,
 	useAuthoritative bool) (bool, error)
+type dnsQueryFunc func(fqdn string, rtype uint16, nameservers []string, recursive bool) (in *dns.Msg, err error)
 
 var (
 	// PreCheckDNS checks DNS propagation before notifying ACME that
 	// the DNS challenge is ready.
 	PreCheckDNS preCheckDNSFunc = checkDNSPropagation
+
+	// dnsQuery is used to be able to mock DNSQuery
+	dnsQuery dnsQueryFunc = DNSQuery
 
 	fqdnToZoneLock sync.RWMutex
 	fqdnToZone     = map[string]string{}
@@ -66,31 +70,44 @@ func getNameservers(path string, defaults []string) []string {
 	return systemNameservers
 }
 
-// Update FQDN with CNAME if any
-func updateDomainWithCName(r *dns.Msg, fqdn string) string {
-	for _, rr := range r.Answer {
-		if cn, ok := rr.(*dns.CNAME); ok {
-			if cn.Hdr.Name == fqdn {
-				logf.V(logf.DebugLevel).Infof("Updating FQDN: %s with its CNAME: %s", fqdn, cn.Target)
-				fqdn = cn.Target
-				break
-			}
-		}
+// Follows the CNAME records and returns the last non-CNAME fully qualified domain name
+// that it finds. Returns an error when a loop is found in the CNAME chain. The
+// argument fqdnChain is used by the function itself to keep track of which fqdns it
+// already encountered and detect loops.
+func followCNAMEs(fqdn string, nameservers []string, fqdnChain ...string) (string, error) {
+	r, err := dnsQuery(fqdn, dns.TypeCNAME, nameservers, true)
+	if err != nil {
+		return "", err
 	}
-
-	return fqdn
+	if r.Rcode != dns.RcodeSuccess {
+		return fqdn, err
+	}
+	for _, rr := range r.Answer {
+		cn, ok := rr.(*dns.CNAME)
+		if !ok || cn.Hdr.Name != fqdn {
+			continue
+		}
+		logf.V(logf.DebugLevel).Infof("Updating FQDN: %s with its CNAME: %s", fqdn, cn.Target)
+		// Check if we were here before to prevent loops in the chain of CNAME records.
+		for _, fqdnInChain := range fqdnChain {
+			if cn.Target != fqdnInChain {
+				continue
+			}
+			return "", fmt.Errorf("Found recursive CNAME record to %q when looking up %q", cn.Target, fqdn)
+		}
+		return followCNAMEs(cn.Target, nameservers, append(fqdnChain, fqdn)...)
+	}
+	return fqdn, nil
 }
 
 // checkDNSPropagation checks if the expected TXT record has been propagated to all authoritative nameservers.
 func checkDNSPropagation(fqdn, value string, nameservers []string,
 	useAuthoritative bool) (bool, error) {
-	// Initial attempt to resolve at the recursive NS
-	r, err := DNSQuery(fqdn, dns.TypeTXT, nameservers, true)
+
+	var err error
+	fqdn, err = followCNAMEs(fqdn, nameservers)
 	if err != nil {
 		return false, err
-	}
-	if r.Rcode == dns.RcodeSuccess {
-		fqdn = updateDomainWithCName(r, fqdn)
 	}
 
 	if !useAuthoritative {
@@ -214,7 +231,10 @@ func ValidateCAA(domain string, issuerID []string, iswildcard bool, nameservers 
 					dns.RcodeToString[msg.Rcode], domain)
 			}
 			oldQuery := queryDomain
-			queryDomain = updateDomainWithCName(msg, queryDomain)
+			queryDomain, err := followCNAMEs(queryDomain, nameservers)
+			if err != nil {
+				return fmt.Errorf("while trying to follow CNAMEs for domain %s using nameservers %v: %w", queryDomain, nameservers, err)
+			}
 			if queryDomain == oldQuery {
 				break
 			}
@@ -312,6 +332,20 @@ func FindZoneByFqdn(fqdn string, nameservers []string) (string, error) {
 	fqdnToZoneLock.RUnlock()
 
 	labelIndexes := dns.Split(fqdn)
+
+	// We are climbing up the domain tree, looking for the SOA record on
+	// one of them. For example, imagine that the DNS tree looks like this:
+	//
+	//  example.com.                                   ← SOA is here.
+	//  └── foo.example.com.
+	//      └── _acme-challenge.foo.example.com.       ← Starting point.
+	//
+	// We start at the bottom of the tree and climb up. The NXDOMAIN error
+	// lets us know that we should climb higher:
+	//
+	//  _acme-challenge.foo.example.com. returns NXDOMAIN
+	//                  foo.example.com. returns NXDOMAIN
+	//                      example.com. returns NOERROR along with the SOA
 	for _, index := range labelIndexes {
 		domain := fqdn[index:]
 
@@ -320,36 +354,39 @@ func FindZoneByFqdn(fqdn string, nameservers []string) (string, error) {
 			return "", err
 		}
 
-		// Any response code other than NOERROR and NXDOMAIN is treated as error
-		if in.Rcode != dns.RcodeNameError && in.Rcode != dns.RcodeSuccess {
-			return "", fmt.Errorf("Unexpected response code '%s' for %s",
-				dns.RcodeToString[in.Rcode], domain)
+		// NXDOMAIN tells us that we did not climb far enough up the DNS tree. We
+		// thus continue climbing to find the SOA record.
+		if in.Rcode == dns.RcodeNameError {
+			continue
 		}
 
-		// Check if we got a SOA RR in the answer section
-		if in.Rcode == dns.RcodeSuccess {
+		// Any non-successful response code, other than NXDOMAIN, is treated as an error
+		// and interrupts the search.
+		if in.Rcode != dns.RcodeSuccess {
+			return "", fmt.Errorf("When querying the SOA record for the domain '%s' using nameservers %v, rcode was expected to be 'NOERROR' or 'NXDOMAIN', but got '%s'",
+				domain, nameservers, dns.RcodeToString[in.Rcode])
+		}
 
-			// CNAME records cannot/should not exist at the root of a zone.
-			// So we skip a domain when a CNAME is found.
-			if dnsMsgContainsCNAME(in) {
-				continue
-			}
+		// As per RFC 2181, CNAME records cannot not exist at the root of a zone,
+		// which means we won't be finding any SOA record for this domain.
+		if dnsMsgContainsCNAME(in) {
+			continue
+		}
 
-			for _, ans := range in.Answer {
-				if soa, ok := ans.(*dns.SOA); ok {
-					fqdnToZoneLock.Lock()
-					defer fqdnToZoneLock.Unlock()
+		for _, ans := range in.Answer {
+			if soa, ok := ans.(*dns.SOA); ok {
+				fqdnToZoneLock.Lock()
+				defer fqdnToZoneLock.Unlock()
 
-					zone := soa.Hdr.Name
-					fqdnToZone[fqdn] = zone
-					logf.V(logf.DebugLevel).Infof("Returning discovered zone record %q for fqdn %q", zone, fqdn)
-					return zone, nil
-				}
+				zone := soa.Hdr.Name
+				fqdnToZone[fqdn] = zone
+				logf.V(logf.DebugLevel).Infof("Returning discovered zone record %q for fqdn %q", zone, fqdn)
+				return zone, nil
 			}
 		}
 	}
 
-	return "", fmt.Errorf("Could not find the start of authority")
+	return "", fmt.Errorf("Could not find the SOA record in the DNS tree for the domain '%s' using nameservers %v", fqdn, nameservers)
 }
 
 // dnsMsgContainsCNAME checks for a CNAME answer in msg

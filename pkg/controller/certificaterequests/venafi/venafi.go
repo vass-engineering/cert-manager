@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,16 +27,18 @@ import (
 
 	"github.com/Venafi/vcert/v4/pkg/endpoint"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	clientset "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificaterequests"
-	crutil "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/util"
-	issuerpkg "github.com/jetstack/cert-manager/pkg/issuer"
-	venaficlient "github.com/jetstack/cert-manager/pkg/issuer/venafi/client"
-	"github.com/jetstack/cert-manager/pkg/issuer/venafi/client/api"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	clientset "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
+	crutil "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/util"
+	issuerpkg "github.com/cert-manager/cert-manager/pkg/issuer"
+	venaficlient "github.com/cert-manager/cert-manager/pkg/issuer/venafi/client"
+	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client/api"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/metrics"
+	utilpki "github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 const (
@@ -50,23 +52,26 @@ type Venafi struct {
 	cmClient      clientset.Interface
 
 	clientBuilder venaficlient.VenafiClientBuilder
+
+	metrics *metrics.Metrics
 }
 
 func init() {
 	// create certificate request controller for venafi issuer
-	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		return controllerpkg.NewBuilder(ctx, CRControllerName).
-			For(certificaterequests.New(apiutil.IssuerVenafi, NewVenafi(ctx))).
+			For(certificaterequests.New(apiutil.IssuerVenafi, NewVenafi)).
 			Complete()
 	})
 }
 
-func NewVenafi(ctx *controllerpkg.Context) *Venafi {
+func NewVenafi(ctx *controllerpkg.Context) certificaterequests.Issuer {
 	return &Venafi{
 		issuerOptions: ctx.IssuerOptions,
 		secretsLister: ctx.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
 		reporter:      crutil.NewReporter(ctx.Clock, ctx.Recorder),
 		clientBuilder: venaficlient.New,
+		metrics:       ctx.Metrics,
 		cmClient:      ctx.CMClient,
 	}
 }
@@ -75,7 +80,7 @@ func (v *Venafi) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuerO
 	log := logf.FromContext(ctx, "sign")
 	log = logf.WithRelatedResource(log, issuerObj)
 
-	client, err := v.clientBuilder(v.issuerOptions.ResourceNamespace(issuerObj), v.secretsLister, issuerObj)
+	client, err := v.clientBuilder(v.issuerOptions.ResourceNamespace(issuerObj), v.secretsLister, issuerObj, v.metrics, log)
 	if k8sErrors.IsNotFound(err) {
 		message := "Required secret resource not found"
 
@@ -162,7 +167,16 @@ func (v *Venafi) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuerO
 
 	log.V(logf.DebugLevel).Info("certificate issued")
 
+	bundle, err := utilpki.ParseSingleCertificateChainPEM(certPem)
+	if err != nil {
+		message := "Failed to parse returned certificate bundle"
+		v.reporter.Failed(cr, err, "ParseError", message)
+		log.Error(err, message)
+		return nil, err
+	}
+
 	return &issuerpkg.IssueResponse{
-		Certificate: certPem,
+		Certificate: bundle.ChainPEM,
+		CA:          bundle.CAPEM,
 	}, nil
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,13 +22,12 @@ import (
 
 	vcert "github.com/Venafi/vcert/v4"
 	corev1 "k8s.io/api/core/v1"
-	clientcorev1 "k8s.io/client-go/listers/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	"github.com/jetstack/cert-manager/test/unit/gen"
-	testlisters "github.com/jetstack/cert-manager/test/unit/listers"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
+	testlisters "github.com/cert-manager/cert-manager/test/unit/listers"
 )
 
 func checkNoConfigReturned(t *testing.T, cnf *vcert.Config) {
@@ -50,7 +49,7 @@ func checkZone(t *testing.T, zone string, cnf *vcert.Config) {
 
 func generateSecretLister(s *corev1.Secret, err error) corelisters.SecretLister {
 	return &testlisters.FakeSecretLister{
-		SecretsFn: func(string) clientcorev1.SecretNamespaceLister {
+		SecretsFn: func(string) corelisters.SecretNamespaceLister {
 			return &testlisters.FakeSecretNamespaceLister{
 				GetFn: func(string) (*corev1.Secret, error) {
 					return s, err

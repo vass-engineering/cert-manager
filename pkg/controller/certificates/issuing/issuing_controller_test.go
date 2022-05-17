@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,18 +22,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	coretesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	fakeclock "k8s.io/utils/clock/testing"
+	"k8s.io/utils/pointer"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	internaltest "github.com/jetstack/cert-manager/pkg/controller/certificates/internal/test"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificates/issuing/internal"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	testcrypto "github.com/cert-manager/cert-manager/test/unit/crypto"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 var (
@@ -51,7 +55,8 @@ func TestIssuingController(t *testing.T) {
 	type testT struct {
 		builder *testpkg.Builder
 
-		certificate *cmapi.Certificate
+		certificate             *cmapi.Certificate
+		expSecretUpdateDataCall *internal.SecretData
 
 		expectedErr bool
 	}
@@ -60,24 +65,26 @@ func TestIssuingController(t *testing.T) {
 
 	baseCert := gen.Certificate("test",
 		gen.SetCertificateIssuer(cmmeta.ObjectReference{Name: "ca-issuer", Kind: "Issuer", Group: "foo.io"}),
+		gen.SetCertificateGeneration(3),
 		gen.SetCertificateSecretName("output"),
 		gen.SetCertificateRenewBefore(time.Hour*36),
 		gen.SetCertificateDNSNames("example.com"),
 		gen.SetCertificateRevision(1),
 		gen.SetCertificateNextPrivateKeySecretName(nextPrivateKeySecretName),
 	)
-	exampleBundle := internaltest.MustCreateCryptoBundle(t, baseCert.DeepCopy(), fixedClock)
+	exampleBundle := testcrypto.MustCreateCryptoBundle(t, baseCert.DeepCopy(), fixedClock)
 
-	exampleBundleAlt := internaltest.MustCreateCryptoBundle(t, baseCert.DeepCopy(), fixedClock)
+	exampleBundleAlt := testcrypto.MustCreateCryptoBundle(t, baseCert.DeepCopy(), fixedClock)
+	metaFixedClockStart := metav1.NewTime(fixedClockStart)
 
 	issuingCert := gen.CertificateFrom(baseCert.DeepCopy(),
 		gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
-			Type:   cmapi.CertificateConditionIssuing,
-			Status: cmmeta.ConditionTrue,
+			Type:               cmapi.CertificateConditionIssuing,
+			Status:             cmmeta.ConditionTrue,
+			ObservedGeneration: 3,
+			LastTransitionTime: &metaFixedClockStart,
 		}),
 	)
-
-	metaFixedClockStart := metav1.NewTime(fixedClockStart)
 
 	tests := map[string]testT{
 		"if certificate is not in Issuing state, then do nothing": {
@@ -174,7 +181,75 @@ func TestIssuingController(t *testing.T) {
 			expectedErr: false,
 		},
 
-		"if certificate is in Issuing state, one CertificateRequest, but has failed, set failed state and log event": {
+		"if certificate is in Issuing state, one CertificateRequest, but has failed and does not match the certificate spec, do nothing": {
+			certificate: exampleBundle.Certificate,
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{
+					issuingCert.DeepCopy(),
+					gen.CertificateRequestFrom(
+						testcrypto.MustCreateCryptoBundle(t,
+							gen.CertificateFrom(issuingCert,
+								gen.SetCertificateDNSNames("foo.com"), // Mismatch since the cert has "example.com"
+							), fixedClock,
+						).CertificateRequest,
+						gen.AddCertificateRequestAnnotations(map[string]string{
+							cmapi.CertificateRequestRevisionAnnotationKey: "2", // Current Certificate revision=1
+						}), gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+							Type:    cmapi.CertificateRequestConditionReady,
+							Status:  cmmeta.ConditionFalse,
+							Reason:  cmapi.CertificateRequestReasonFailed,
+							Message: "The certificate request failed because of reasons",
+						}),
+					),
+				},
+				KubeObjects: []runtime.Object{
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      nextPrivateKeySecretName,
+							Namespace: exampleBundle.Certificate.Namespace,
+						},
+						Data: map[string][]byte{
+							corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
+						},
+					},
+				},
+				ExpectedActions: []testpkg.Action{},
+			},
+			expectedErr: false,
+		},
+		"if certificate is in Issuing state, one CertificateRequest that has failed during previous issuance, do nothing": {
+			certificate: exampleBundle.Certificate,
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{
+					gen.CertificateFrom(issuingCert),
+					gen.CertificateRequestFrom(exampleBundle.CertificateRequestFailed,
+						gen.AddCertificateRequestAnnotations(map[string]string{
+							cmapi.CertificateRequestRevisionAnnotationKey: "2", // Current Certificate revision=1
+						}),
+						gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+							Type:    cmapi.CertificateRequestConditionReady,
+							Status:  cmmeta.ConditionFalse,
+							Reason:  cmapi.CertificateRequestReasonFailed,
+							Message: "The certificate request failed because of reasons",
+						}),
+						gen.SetCertificateRequestFailureTime(metav1.Time{Time: metaFixedClockStart.Time.Add(time.Hour * -1)}),
+					)},
+				KubeObjects: []runtime.Object{
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      nextPrivateKeySecretName,
+							Namespace: exampleBundle.Certificate.Namespace,
+						},
+						Data: map[string][]byte{
+							corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
+						},
+					},
+				},
+				ExpectedActions: []testpkg.Action{},
+			},
+			expectedErr: false,
+		},
+		"if certificate is in Issuing state, one CertificateRequest, and has failed for the first time during this series of attempts, set failed state with one issuance attempt and log event": {
 			certificate: exampleBundle.Certificate,
 			builder: &testpkg.Builder{
 				CertManagerObjects: []runtime.Object{
@@ -213,8 +288,62 @@ func TestIssuingController(t *testing.T) {
 								Reason:             "Failed",
 								Message:            "The certificate request has failed to complete and will be retried: The certificate request failed because of reasons",
 								LastTransitionTime: &metaFixedClockStart,
+								ObservedGeneration: 3,
 							}),
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
+							gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+						),
+					)),
+				},
+				ExpectedEvents: []string{
+					"Warning Failed The certificate request has failed to complete and will be retried: The certificate request failed because of reasons",
+				},
+			},
+			expectedErr: false,
+		},
+		"if certificate is in Issuing state, one CertificateRequest, and has failed for the fifth time during this series of attempts, set failed state with five issuance attempts and log event": {
+			certificate: exampleBundle.Certificate,
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{
+					gen.CertificateFrom(issuingCert, gen.SetCertificateIssuanceAttempts(pointer.Int(4))),
+					gen.CertificateRequestFrom(exampleBundle.CertificateRequestFailed,
+						gen.AddCertificateRequestAnnotations(map[string]string{
+							cmapi.CertificateRequestRevisionAnnotationKey: "2", // Current Certificate revision=1
+						}),
+						gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+							Type:    cmapi.CertificateRequestConditionReady,
+							Status:  cmmeta.ConditionFalse,
+							Reason:  cmapi.CertificateRequestReasonFailed,
+							Message: "The certificate request failed because of reasons",
+						}),
+					)},
+				KubeObjects: []runtime.Object{
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      nextPrivateKeySecretName,
+							Namespace: exampleBundle.Certificate.Namespace,
+						},
+						Data: map[string][]byte{
+							corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
+						},
+					},
+				},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificates"),
+						"status",
+						exampleBundle.Certificate.Namespace,
+						gen.CertificateFrom(exampleBundle.Certificate,
+							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
+								Type:               cmapi.CertificateConditionIssuing,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Failed",
+								Message:            "The certificate request has failed to complete and will be retried: The certificate request failed because of reasons",
+								LastTransitionTime: &metaFixedClockStart,
+								ObservedGeneration: 3,
+							}),
+							gen.SetCertificateLastFailureTime(metaFixedClockStart),
+							gen.SetCertificateIssuanceAttempts(pointer.Int(5)),
 						),
 					)),
 				},
@@ -372,35 +501,15 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateRevision(2),
 						),
 					)),
-					testpkg.NewAction(coretesting.NewCreateAction(
-						corev1.SchemeGroupVersion.WithResource("secrets"),
-						exampleBundle.Certificate.Namespace,
-						&corev1.Secret{
-							ObjectMeta: metav1.ObjectMeta{
-								Namespace: exampleBundle.Certificate.Namespace,
-								Name:      "output",
-								Annotations: map[string]string{
-									cmapi.CertificateNameKey:       "test",
-									cmapi.IssuerKindAnnotationKey:  "Issuer",
-									cmapi.IssuerNameAnnotationKey:  "ca-issuer",
-									cmapi.IssuerGroupAnnotationKey: "foo.io",
-									cmapi.CommonNameAnnotationKey:  "",
-									cmapi.AltNamesAnnotationKey:    "example.com",
-									cmapi.IPSANAnnotationKey:       "",
-									cmapi.URISANAnnotationKey:      "",
-								},
-							},
-							Data: map[string][]byte{
-								corev1.TLSCertKey:       exampleBundle.CertificateRequestReady.Status.Certificate,
-								corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
-							},
-							Type: corev1.SecretTypeTLS,
-						},
-					)),
 				},
 				ExpectedEvents: []string{
 					"Normal Issuing The certificate has been successfully issued",
 				},
+			},
+			expSecretUpdateDataCall: &internal.SecretData{
+				Certificate: exampleBundle.CertificateRequestReady.Status.Certificate,
+				PrivateKey:  exampleBundle.PrivateKeyBytes,
+				CA:          nil,
 			},
 			expectedErr: false,
 		},
@@ -432,6 +541,7 @@ func TestIssuingController(t *testing.T) {
 							Annotations: map[string]string{
 								"my-custom": "annotation",
 							},
+							Labels: map[string]string{},
 						},
 						Type: corev1.SecretTypeTLS,
 					},
@@ -445,36 +555,122 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateRevision(2),
 						),
 					)),
-					testpkg.NewAction(coretesting.NewUpdateAction(
-						corev1.SchemeGroupVersion.WithResource("secrets"),
-						exampleBundle.Certificate.Namespace,
-						&corev1.Secret{
-							ObjectMeta: metav1.ObjectMeta{
-								Namespace: exampleBundle.Certificate.Namespace,
-								Name:      "output",
-								Annotations: map[string]string{
-									"my-custom":                    "annotation",
-									cmapi.CertificateNameKey:       "test",
-									cmapi.IssuerGroupAnnotationKey: "foo.io",
-									cmapi.IssuerKindAnnotationKey:  "Issuer",
-									cmapi.IssuerNameAnnotationKey:  "ca-issuer",
-									cmapi.CommonNameAnnotationKey:  "",
-									cmapi.AltNamesAnnotationKey:    "example.com",
-									cmapi.IPSANAnnotationKey:       "",
-									cmapi.URISANAnnotationKey:      "",
-								},
-							},
-							Data: map[string][]byte{
-								corev1.TLSCertKey:       exampleBundle.CertificateRequestReady.Status.Certificate,
-								corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
-							},
-							Type: corev1.SecretTypeTLS,
+				},
+				ExpectedEvents: []string{
+					"Normal Issuing The certificate has been successfully issued",
+				},
+			},
+			expSecretUpdateDataCall: &internal.SecretData{
+				Certificate: exampleBundle.CertificateRequestReady.Status.Certificate,
+				PrivateKey:  exampleBundle.PrivateKeyBytes,
+				CA:          nil,
+			},
+			expectedErr: false,
+		},
+		"if certificate is in Issuing state, one ready CertificateRequest and has last failure time set from previous issuance, set the Issuing condition to true, remove last failure time and store the signed certificate, ca, and private key to an existing secret, and log an event": {
+			certificate: exampleBundle.Certificate,
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{
+					gen.CertificateFrom(issuingCert, gen.SetCertificateLastFailureTime(metaFixedClockStart)),
+					gen.CertificateRequestFrom(exampleBundle.CertificateRequestReady,
+						gen.AddCertificateRequestAnnotations(map[string]string{
+							cmapi.CertificateRequestRevisionAnnotationKey: "2", // Current Certificate revision=1
+						}),
+					)},
+				KubeObjects: []runtime.Object{
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      nextPrivateKeySecretName,
+							Namespace: exampleBundle.Certificate.Namespace,
 						},
+						Data: map[string][]byte{
+							corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
+						},
+					},
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace: exampleBundle.Certificate.Namespace,
+							Name:      "output",
+							Annotations: map[string]string{
+								"my-custom": "annotation",
+							},
+							Labels: map[string]string{},
+						},
+						Type: corev1.SecretTypeTLS,
+					},
+				},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificates"),
+						"status",
+						exampleBundle.Certificate.Namespace,
+						gen.CertificateFrom(exampleBundle.Certificate,
+							gen.SetCertificateRevision(2),
+						),
 					)),
 				},
 				ExpectedEvents: []string{
 					"Normal Issuing The certificate has been successfully issued",
 				},
+			},
+			expSecretUpdateDataCall: &internal.SecretData{
+				Certificate: exampleBundle.CertificateRequestReady.Status.Certificate,
+				PrivateKey:  exampleBundle.PrivateKeyBytes,
+				CA:          nil,
+			},
+			expectedErr: false,
+		},
+		"if certificate is in Issuing state, one ready CertificateRequest and has last failure time and issuance attempts set from a previous issuance, set the Issuing condition to true, remove last failure time and issuance attempts and store the signed certificate, ca, and private key to an existing secret, and log an event": {
+			certificate: exampleBundle.Certificate,
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{
+					gen.CertificateFrom(issuingCert, gen.SetCertificateLastFailureTime(metaFixedClockStart),
+						gen.SetCertificateIssuanceAttempts(pointer.Int(4))),
+					gen.CertificateRequestFrom(exampleBundle.CertificateRequestReady,
+						gen.AddCertificateRequestAnnotations(map[string]string{
+							cmapi.CertificateRequestRevisionAnnotationKey: "2", // Current Certificate revision=1
+						}),
+					)},
+				KubeObjects: []runtime.Object{
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      nextPrivateKeySecretName,
+							Namespace: exampleBundle.Certificate.Namespace,
+						},
+						Data: map[string][]byte{
+							corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
+						},
+					},
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Namespace: exampleBundle.Certificate.Namespace,
+							Name:      "output",
+							Annotations: map[string]string{
+								"my-custom": "annotation",
+							},
+							Labels: map[string]string{},
+						},
+						Type: corev1.SecretTypeTLS,
+					},
+				},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificates"),
+						"status",
+						exampleBundle.Certificate.Namespace,
+						gen.CertificateFrom(exampleBundle.Certificate,
+							gen.SetCertificateRevision(2),
+						),
+					)),
+				},
+				ExpectedEvents: []string{
+					"Normal Issuing The certificate has been successfully issued",
+				},
+			},
+			expSecretUpdateDataCall: &internal.SecretData{
+				Certificate: exampleBundle.CertificateRequestReady.Status.Certificate,
+				PrivateKey:  exampleBundle.PrivateKeyBytes,
+				CA:          nil,
 			},
 			expectedErr: false,
 		},
@@ -504,36 +700,14 @@ func TestIssuingController(t *testing.T) {
 						},
 					},
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewCreateAction(
-						corev1.SchemeGroupVersion.WithResource("secrets"),
-						exampleBundle.Certificate.Namespace,
-						&corev1.Secret{
-							ObjectMeta: metav1.ObjectMeta{
-								Namespace: exampleBundle.Certificate.Namespace,
-								Name:      "output",
-								Annotations: map[string]string{
-									cmapi.CertificateNameKey:       "test",
-									cmapi.IssuerGroupAnnotationKey: "foo.io",
-									cmapi.IssuerKindAnnotationKey:  "Issuer",
-									cmapi.IssuerNameAnnotationKey:  "ca-issuer",
-									cmapi.CommonNameAnnotationKey:  "",
-									cmapi.AltNamesAnnotationKey:    "example.com",
-									cmapi.IPSANAnnotationKey:       "",
-									cmapi.URISANAnnotationKey:      "",
-								},
-							},
-							Data: map[string][]byte{
-								corev1.TLSCertKey:       exampleBundle.LocalTemporaryCertificateBytes,
-								corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
-							},
-							Type: corev1.SecretTypeTLS,
-						},
-					)),
-				},
 				ExpectedEvents: []string{
 					"Normal Issuing Issued temporary certificate",
 				},
+			},
+			expSecretUpdateDataCall: &internal.SecretData{
+				Certificate: exampleBundle.LocalTemporaryCertificateBytes,
+				PrivateKey:  exampleBundle.PrivateKeyBytes,
+				CA:          nil,
 			},
 			expectedErr: false,
 		},
@@ -574,37 +748,14 @@ func TestIssuingController(t *testing.T) {
 						Type: corev1.SecretTypeTLS,
 					},
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateAction(
-						corev1.SchemeGroupVersion.WithResource("secrets"),
-						exampleBundle.Certificate.Namespace,
-						&corev1.Secret{
-							ObjectMeta: metav1.ObjectMeta{
-								Namespace: exampleBundle.Certificate.Namespace,
-								Name:      "output",
-								Annotations: map[string]string{
-									"my-custom":                    "annotation",
-									cmapi.CertificateNameKey:       "test",
-									cmapi.IssuerGroupAnnotationKey: "foo.io",
-									cmapi.IssuerKindAnnotationKey:  "Issuer",
-									cmapi.IssuerNameAnnotationKey:  "ca-issuer",
-									cmapi.CommonNameAnnotationKey:  "",
-									cmapi.AltNamesAnnotationKey:    "example.com",
-									cmapi.IPSANAnnotationKey:       "",
-									cmapi.URISANAnnotationKey:      "",
-								},
-							},
-							Data: map[string][]byte{
-								corev1.TLSCertKey:       exampleBundle.LocalTemporaryCertificateBytes,
-								corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
-							},
-							Type: corev1.SecretTypeTLS,
-						},
-					)),
-				},
 				ExpectedEvents: []string{
 					"Normal Issuing Issued temporary certificate",
 				},
+			},
+			expSecretUpdateDataCall: &internal.SecretData{
+				Certificate: exampleBundle.LocalTemporaryCertificateBytes,
+				PrivateKey:  exampleBundle.PrivateKeyBytes,
+				CA:          nil,
 			},
 			expectedErr: false,
 		},
@@ -640,6 +791,7 @@ func TestIssuingController(t *testing.T) {
 							Annotations: map[string]string{
 								"my-custom": "annotation",
 							},
+							Labels: map[string]string{},
 						},
 						Data: map[string][]byte{
 							corev1.TLSCertKey:       exampleBundleAlt.CertBytes,
@@ -685,6 +837,7 @@ func TestIssuingController(t *testing.T) {
 							Annotations: map[string]string{
 								"my-custom": "annotation",
 							},
+							Labels: map[string]string{},
 						},
 						Data: map[string][]byte{
 							corev1.TLSPrivateKeyKey: []byte("abc"),
@@ -692,37 +845,14 @@ func TestIssuingController(t *testing.T) {
 						Type: corev1.SecretTypeTLS,
 					},
 				},
-				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateAction(
-						corev1.SchemeGroupVersion.WithResource("secrets"),
-						exampleBundle.Certificate.Namespace,
-						&corev1.Secret{
-							ObjectMeta: metav1.ObjectMeta{
-								Namespace: exampleBundle.Certificate.Namespace,
-								Name:      "output",
-								Annotations: map[string]string{
-									"my-custom":                    "annotation",
-									cmapi.CertificateNameKey:       "test",
-									cmapi.IssuerGroupAnnotationKey: "foo.io",
-									cmapi.IssuerKindAnnotationKey:  "Issuer",
-									cmapi.IssuerNameAnnotationKey:  "ca-issuer",
-									cmapi.CommonNameAnnotationKey:  "",
-									cmapi.AltNamesAnnotationKey:    "example.com",
-									cmapi.IPSANAnnotationKey:       "",
-									cmapi.URISANAnnotationKey:      "",
-								},
-							},
-							Data: map[string][]byte{
-								corev1.TLSCertKey:       exampleBundle.LocalTemporaryCertificateBytes,
-								corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
-							},
-							Type: corev1.SecretTypeTLS,
-						},
-					)),
-				},
 				ExpectedEvents: []string{
 					"Normal Issuing Issued temporary certificate",
 				},
+			},
+			expSecretUpdateDataCall: &internal.SecretData{
+				Certificate: exampleBundle.LocalTemporaryCertificateBytes,
+				PrivateKey:  exampleBundle.PrivateKeyBytes,
+				CA:          nil,
 			},
 			expectedErr: false,
 		},
@@ -758,6 +888,7 @@ func TestIssuingController(t *testing.T) {
 							Annotations: map[string]string{
 								"my-custom": "annotation",
 							},
+							Labels: map[string]string{},
 						},
 						Data: map[string][]byte{
 							corev1.TLSCertKey:       exampleBundle.LocalTemporaryCertificateBytes, // Cert not valid but still matches private key
@@ -808,35 +939,15 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateRevision(2),
 						),
 					)),
-					testpkg.NewAction(coretesting.NewCreateAction(
-						corev1.SchemeGroupVersion.WithResource("secrets"),
-						exampleBundle.Certificate.Namespace,
-						&corev1.Secret{
-							ObjectMeta: metav1.ObjectMeta{
-								Namespace: exampleBundle.Certificate.Namespace,
-								Name:      "output",
-								Annotations: map[string]string{
-									cmapi.CertificateNameKey:       "test",
-									cmapi.IssuerGroupAnnotationKey: "foo.io",
-									cmapi.IssuerKindAnnotationKey:  "Issuer",
-									cmapi.IssuerNameAnnotationKey:  "ca-issuer",
-									cmapi.CommonNameAnnotationKey:  "",
-									cmapi.AltNamesAnnotationKey:    "example.com",
-									cmapi.IPSANAnnotationKey:       "",
-									cmapi.URISANAnnotationKey:      "",
-								},
-							},
-							Data: map[string][]byte{
-								corev1.TLSCertKey:       exampleBundle.CertificateRequestReady.Status.Certificate,
-								corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
-							},
-							Type: corev1.SecretTypeTLS,
-						},
-					)),
 				},
 				ExpectedEvents: []string{
 					"Normal Issuing The certificate has been successfully issued",
 				},
+			},
+			expSecretUpdateDataCall: &internal.SecretData{
+				Certificate: exampleBundle.CertificateRequestReady.Status.Certificate,
+				PrivateKey:  exampleBundle.PrivateKeyBytes,
+				CA:          nil,
 			},
 			expectedErr: false,
 		},
@@ -886,13 +997,67 @@ func TestIssuingController(t *testing.T) {
 								Reason:             "Failed",
 								Message:            "The certificate request has failed to complete and will be retried: The certificate request failed because of reasons",
 								LastTransitionTime: &metaFixedClockStart,
+								ObservedGeneration: 3,
 							}),
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
+							gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
 						),
 					)),
 				},
 				ExpectedEvents: []string{
 					"Warning Failed The certificate request has failed to complete and will be retried: The certificate request failed because of reasons",
+				},
+			},
+			expectedErr: false,
+		},
+		"if certificate is in Issuing state, one CertificateRequest, but has been denied, report denial and set last failed time and issuance attempts": {
+			certificate: exampleBundle.Certificate,
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{
+					gen.CertificateFrom(issuingCert),
+					gen.CertificateRequestFrom(exampleBundle.CertificateRequest,
+						gen.AddCertificateRequestAnnotations(map[string]string{
+							cmapi.CertificateRequestRevisionAnnotationKey: "2", // Current Certificate revision=1
+						}),
+						gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+							Type:    cmapi.CertificateRequestConditionDenied,
+							Status:  cmmeta.ConditionTrue,
+							Reason:  "DeniedReason",
+							Message: "The certificate request has been denied",
+						}),
+					)},
+				KubeObjects: []runtime.Object{
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      nextPrivateKeySecretName,
+							Namespace: exampleBundle.Certificate.Namespace,
+						},
+						Data: map[string][]byte{
+							corev1.TLSPrivateKeyKey: exampleBundle.PrivateKeyBytes,
+						},
+					},
+				},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificates"),
+						"status",
+						exampleBundle.Certificate.Namespace,
+						gen.CertificateFrom(exampleBundle.Certificate,
+							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
+								Type:               cmapi.CertificateConditionIssuing,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "DeniedReason",
+								Message:            "The certificate request has failed to complete and will be retried: The certificate request has been denied",
+								LastTransitionTime: &metaFixedClockStart,
+								ObservedGeneration: 3,
+							}),
+							gen.SetCertificateLastFailureTime(metaFixedClockStart),
+							gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+						),
+					)),
+				},
+				ExpectedEvents: []string{
+					"Warning DeniedReason The certificate request has failed to complete and will be retried: The certificate request has been denied",
 				},
 			},
 			expectedErr: false,
@@ -904,15 +1069,25 @@ func TestIssuingController(t *testing.T) {
 			fixedClock.SetTime(fixedClockStart)
 			test.builder.Clock = fixedClock
 			test.builder.T = t
-			test.builder.Init()
+			test.builder.InitWithRESTConfig()
 			defer test.builder.Stop()
 
-			// Instantiate/setup the controller
 			w := controllerWrapper{}
-			w.Register(test.builder.Context)
+			_, _, err := w.Register(test.builder.Context)
+			require.NoError(t, err)
 			w.controller.localTemporarySigner = testLocalTemporarySignerFn(exampleBundle.LocalTemporaryCertificateBytes)
 
-			// Start the unit test builder
+			var secretsUpdateDataCalled bool
+			w.controller.secretsUpdateData = func(_ context.Context, _ *cmapi.Certificate, secretData internal.SecretData) error {
+				secretsUpdateDataCalled = true
+				assert.Equal(t, *test.expSecretUpdateDataCall, secretData, "expected secretData: %#+v, got %#+v", *test.expSecretUpdateDataCall, secretData)
+				return nil
+			}
+			t.Cleanup(func() {
+				wantsSecretUpdateDataCall := test.expSecretUpdateDataCall != nil
+				assert.Equal(t, test.expSecretUpdateDataCall != nil, secretsUpdateDataCalled, "expected secretUpdateData func to be called: %t was called: %t", wantsSecretUpdateDataCall, secretsUpdateDataCalled)
+			})
+
 			test.builder.Start()
 
 			key, err := cache.MetaNamespaceKeyFunc(test.certificate)

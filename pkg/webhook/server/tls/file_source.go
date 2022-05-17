@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,16 +18,16 @@ package tls
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
-	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 // FileCertificateSource provides certificate data for a golang HTTP server by
@@ -53,9 +53,7 @@ type FileCertificateSource struct {
 	// If not specified, a default of 12 will be used.
 	MaxFailures int
 
-	// Log is an optional logger to write informational and error messages to.
-	// If not specified, no messages will be logged.
-	Log logr.Logger
+	log logr.Logger
 
 	cachedCertificate *tls.Certificate
 	cachedCertBytes   []byte
@@ -68,10 +66,8 @@ const defaultMaxFailures = 12
 
 var _ CertificateSource = &FileCertificateSource{}
 
-func (f *FileCertificateSource) Run(stopCh <-chan struct{}) error {
-	if f.Log == nil {
-		f.Log = crlog.NullLogger{}
-	}
+func (f *FileCertificateSource) Run(ctx context.Context) error {
+	f.log = logf.FromContext(ctx)
 
 	updateInterval := f.UpdateInterval
 	if updateInterval == 0 {
@@ -85,7 +81,7 @@ func (f *FileCertificateSource) Run(stopCh <-chan struct{}) error {
 	// read the certificate data for the first time immediately, but allow
 	// retrying if the first attempt fails
 	if err := f.updateCertificateFromDisk(); err != nil {
-		f.Log.Error(err, "failed to read certificate from disk")
+		f.log.Error(err, "failed to read certificate from disk")
 	}
 
 	failures := 0
@@ -93,18 +89,18 @@ func (f *FileCertificateSource) Run(stopCh <-chan struct{}) error {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-stopCh:
+		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 			if err := f.updateCertificateFromDisk(); err != nil {
 				failures++
-				f.Log.Error(err, "failed to update certificate from disk", "failures", failures)
+				f.log.Error(err, "failed to update certificate from disk", "failures", failures)
 				if failures >= maxFailures {
 					return fmt.Errorf("failed to update certificate from disk %d times: %v", failures, err)
 				}
 				continue
 			}
-			f.Log.V(logf.DebugLevel).Info("refreshed certificate from data on disk")
+			f.log.V(logf.DebugLevel).Info("refreshed certificate from data on disk")
 		}
 	}
 }
@@ -125,23 +121,23 @@ func (f *FileCertificateSource) Healthy() bool {
 // updateCertificateFromDisk will read private key and certificate data from
 // disk and update the cached tls.Certificate if the data on disk has changed.
 func (f *FileCertificateSource) updateCertificateFromDisk() error {
-	keyData, err := ioutil.ReadFile(f.KeyPath)
+	keyData, err := os.ReadFile(f.KeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to read keyPath: %w", err)
 	}
 
-	certData, err := ioutil.ReadFile(f.CertPath)
+	certData, err := os.ReadFile(f.CertPath)
 	if err != nil {
 		return fmt.Errorf("failed to read certPath: %w", err)
 	}
 
 	f.lock.Lock()
 	defer f.lock.Unlock()
-	if bytes.Compare(keyData, f.cachedKeyBytes) == 0 && bytes.Compare(certData, f.cachedCertBytes) == 0 {
-		f.Log.V(logf.DebugLevel).Info("key and certificate on disk have not changed")
+	if bytes.Equal(keyData, f.cachedKeyBytes) && bytes.Equal(certData, f.cachedCertBytes) {
+		f.log.V(logf.DebugLevel).Info("key and certificate on disk have not changed")
 		return nil
 	}
-	f.Log.V(logf.InfoLevel).Info("detected private key or certificate data on disk has changed. reloading certificate")
+	f.log.V(logf.InfoLevel).Info("detected private key or certificate data on disk has changed. reloading certificate")
 
 	cert, err := tls.X509KeyPair(certData, keyData)
 	if err != nil {

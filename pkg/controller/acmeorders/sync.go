@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,21 +22,37 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"reflect"
+	"time"
 
 	acmeapi "golang.org/x/crypto/acme"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/cache"
 
-	"github.com/jetstack/cert-manager/pkg/acme"
-	acmecl "github.com/jetstack/cert-manager/pkg/acme/client"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	internalorders "github.com/cert-manager/cert-manager/internal/controller/orders"
+	"github.com/cert-manager/cert-manager/pkg/acme"
+	acmecl "github.com/cert-manager/cert-manager/pkg/acme/client"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
+)
+
+const (
+	reasonSolver  = "Solver"
+	reasonCreated = "Created"
+)
+
+var (
+	// RequeuePeriod is the default period after which an Order should be re-queued.
+	// It can be overriden in tests.
+	RequeuePeriod time.Duration = time.Second * 5
 )
 
 func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
@@ -47,13 +63,12 @@ func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
 	o = o.DeepCopy()
 
 	defer func() {
-		// TODO: replace with more efficient comparison
-		if reflect.DeepEqual(oldOrder.Status, o.Status) {
+		if apiequality.Semantic.DeepEqual(oldOrder.Status, o.Status) {
 			dbg.Info("skipping updating resource as new status == existing status")
 			return
 		}
 		log.V(logf.DebugLevel).Info("updating Order resource status")
-		_, updateErr := c.cmClient.AcmeV1().Orders(o.Namespace).UpdateStatus(context.TODO(), o, metav1.UpdateOptions{})
+		updateErr := c.updateOrApplyStatus(ctx, o)
 		if updateErr != nil {
 			log.Error(err, "failed to update status")
 			err = utilerrors.NewAggregate([]error{err, updateErr})
@@ -72,6 +87,10 @@ func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
 	}
 
 	switch {
+	case acme.IsFailureState(o.Status.State):
+		log.V(logf.DebugLevel).Info("Doing nothing as Order is in a failed state")
+		// if the Order is failed there's nothing left for us to do, return nil
+		return nil
 	case o.Status.URL == "":
 		log.V(logf.DebugLevel).Info("Creating new ACME order as status.url is not set")
 		return c.createOrder(ctx, cl, o)
@@ -90,25 +109,22 @@ func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
 	case anyAuthorizationsMissingMetadata(o):
 		log.V(logf.DebugLevel).Info("Fetching Authorizations from ACME server as status.authorizations contains unpopulated authorizations")
 		return c.fetchMetadataForAuthorizations(ctx, o, cl)
-	case acme.IsFailureState(o.Status.State):
-		log.V(logf.DebugLevel).Info("Doing nothing as Order is in a failed state")
-		// if the Order is failed there's nothing left for us to do, return nil
-		return nil
+	// TODO: is this state possible? Either remove this case or add a comment as to what path could lead to it
 	case o.Status.State == cmacme.Valid && o.Status.Certificate == nil:
 		log.V(logf.DebugLevel).Info("Order is in a Valid state but the Certificate data is empty, fetching existing Certificate")
-		return c.fetchCertificateData(ctx, cl, o)
+		return c.syncCertificateData(ctx, cl, o, genericIssuer)
 	case o.Status.State == cmacme.Valid && len(o.Status.Certificate) > 0:
 		log.V(logf.DebugLevel).Info("Order has already been completed, cleaning up any owned Challenge resources")
 		// if the Order is valid and the certificate data has been set, clean
 		// up any owned Challenge resources and do nothing
-		return c.deleteAllChallenges(o)
+		return c.deleteAllChallenges(ctx, o)
 	}
 
 	dbg.Info("Computing list of Challenge resources that need to exist to complete this Order")
 	requiredChallenges, err := buildRequiredChallenges(ctx, cl, genericIssuer, o)
 	if err != nil {
 		log.Error(err, "Failed to determine the list of Challenge resources needed for the Order")
-		c.recorder.Eventf(o, corev1.EventTypeWarning, "Solver", "Failed to determine a valid solver configuration for the set of domains on the Order: %v", err)
+		c.recorder.Eventf(o, corev1.EventTypeWarning, reasonSolver, "Failed to determine a valid solver configuration for the set of domains on the Order: %v", err)
 		return nil
 	}
 
@@ -126,10 +142,10 @@ func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
 	switch {
 	case needToCreateChallenges:
 		log.V(logf.DebugLevel).Info("Creating additional Challenge resources to complete Order")
-		return c.createRequiredChallenges(o, requiredChallenges)
+		return c.createRequiredChallenges(ctx, o, requiredChallenges)
 	case needToDeleteChallenges:
 		log.V(logf.DebugLevel).Info("Deleting leftover Challenge resources no longer required by Order")
-		return c.deleteLeftoverChallenges(o, requiredChallenges)
+		return c.deleteLeftoverChallenges(ctx, o, requiredChallenges)
 	}
 
 	// we know that this list only contains the 'required' challenges as we use
@@ -140,16 +156,36 @@ func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
 		return err
 	}
 
-	switch {
-	case o.Status.State == cmacme.Ready:
+	if o.Status.State == cmacme.Ready {
 		log.V(logf.DebugLevel).Info("Finalizing Order as order state is 'Ready'")
 		return c.finalizeOrder(ctx, cl, o, genericIssuer)
+	}
+
+	// Note: each of the following code paths uses the ACME Order retrieved
+	// here. Be mindful when adding new code below this call to ACME server-
+	// if the new code does not need this ACME order, try to place it above
+	// this call to avoid extra calls to ACME.
+	acmeOrder, err := getACMEOrder(ctx, cl, o)
+	// Order probably has been deleted, we cannot recover here.
+	if acmeErr, ok := err.(*acmeapi.Error); ok {
+		if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
+			log.Error(err, "failed to retrieve the ACME order (4xx error) marking Order as failed")
+			c.setOrderState(&o.Status, string(cmacme.Errored))
+			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", err)
+			return nil
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	switch {
 	case anyChallengesFailed(challenges):
 		// TODO (@munnerz): instead of waiting for the ACME server to mark this
 		//  Order as failed, we could just mark the Order as failed as there is
 		//  no way that we will attempt and continue the order anyway.
 		log.V(logf.DebugLevel).Info("Update Order status as at least one Challenge has failed")
-		_, err := c.updateOrderStatus(ctx, cl, o)
+		_, err := c.updateOrderStatusFromACMEOrder(ctx, cl, o, acmeOrder)
 		if acmeErr, ok := err.(*acmeapi.Error); ok {
 			if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 				log.Error(err, "failed to update Order status due to a 4xx error, marking Order as failed")
@@ -159,11 +195,37 @@ func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
 			}
 		}
 		return err
+
 	// anyChallengesFailed(challenges) == false is already implied by the above
-	// case, but explicitly check it here in case anything changes in future.
+	// case, but explicitly check it in the following cases for if anything changes in future.
+
+	// This is to avoid stuck Orders in edge cases where all the Challenges have
+	// been finalized, but the ACME server has not yet updated the ACME Order's
+	// status to valid. This is not an expected behaviour from an ACME server
+	// https://tools.ietf.org/html/rfc8555#section-7.1.6
+	// https://github.com/cert-manager/cert-manager/issues/2868
+	case !anyChallengesFailed(challenges) && allChallengesFinal(challenges) && acmeOrder.Status == acmeapi.StatusPending:
+		log.V(logf.InfoLevel).Info("All challenges in a final state, waiting for ACME server to update the status of the order...")
+		// This is probably not needed as at this point the Order's status
+		// should already be Pending, but set it anyway to be explicit.
+		c.setOrderState(&o.Status, string(cmacme.Pending))
+		key, err := cache.MetaNamespaceKeyFunc(o)
+		if err != nil {
+			log.Error(err, "failed to construct key for pending Order")
+			// We should never end up here as this error would have been
+			// encountered in informers callback already. This probably cannot
+			// be fixed by re-queueing. If we do start encountering this
+			// scenario, we should consider whether the Order should be marked
+			// as failed here.
+			return nil
+		}
+		// Re-queue the Order to be processed again after 5 seconds.
+		c.scheduledWorkQueue.Add(key, RequeuePeriod)
+		return nil
+
 	case !anyChallengesFailed(challenges) && allChallengesFinal(challenges):
 		log.V(logf.DebugLevel).Info("All challenges are in a final state, updating order state")
-		_, err := c.updateOrderStatus(ctx, cl, o)
+		_, err := c.updateOrderStatusFromACMEOrder(ctx, cl, o, acmeOrder)
 		if acmeErr, ok := err.(*acmeapi.Error); ok {
 			if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 				log.Error(err, "failed to update Order status due to a 4xx error, marking Order as failed")
@@ -228,18 +290,15 @@ func (c *controller) createOrder(ctx context.Context, cl acmecl.Interface, o *cm
 }
 
 func (c *controller) updateOrderStatus(ctx context.Context, cl acmecl.Interface, o *cmacme.Order) (*acmeapi.Order, error) {
-	log := logf.FromContext(ctx)
-	if o.Status.URL == "" {
-		return nil, fmt.Errorf("internal error: order URL not set")
-	}
-
-	log.V(logf.DebugLevel).Info("Fetching Order metadata from ACME server")
-	acmeOrder, err := cl.GetOrder(ctx, o.Status.URL)
+	acmeOrder, err := getACMEOrder(ctx, cl, o)
 	if err != nil {
 		return nil, err
 	}
 
-	log.V(logf.DebugLevel).Info("Retrieved ACME order from server", "raw_data", acmeOrder)
+	return c.updateOrderStatusFromACMEOrder(ctx, cl, o, acmeOrder)
+}
+
+func (c *controller) updateOrderStatusFromACMEOrder(ctx context.Context, cl acmecl.Interface, o *cmacme.Order, acmeOrder *acmeapi.Order) (*acmeapi.Order, error) {
 	// Workaround bug in golang.org/x/crypto/acme implementation whereby the
 	// order's URI field will be empty when calling GetOrder due to the
 	// 'Location' header not being set on the response from the ACME server.
@@ -340,16 +399,16 @@ func (c *controller) anyRequiredChallengesDoNotExist(requiredChallenges []cmacme
 	return false, nil
 }
 
-func (c *controller) createRequiredChallenges(o *cmacme.Order, requiredChallenges []cmacme.Challenge) error {
+func (c *controller) createRequiredChallenges(ctx context.Context, o *cmacme.Order, requiredChallenges []cmacme.Challenge) error {
 	for _, ch := range requiredChallenges {
-		_, err := c.cmClient.AcmeV1().Challenges(ch.Namespace).Create(context.TODO(), &ch, metav1.CreateOptions{})
+		_, err := c.cmClient.AcmeV1().Challenges(ch.Namespace).Create(ctx, &ch, metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		c.recorder.Eventf(o, corev1.EventTypeNormal, "Created", "Created Challenge resource %q for domain %q", ch.Name, ch.Spec.DNSName)
+		c.recorder.Eventf(o, corev1.EventTypeNormal, reasonCreated, "Created Challenge resource %q for domain %q", ch.Name, ch.Spec.DNSName)
 	}
 	return nil
 }
@@ -363,14 +422,14 @@ func (c *controller) anyLeftoverChallengesExist(o *cmacme.Order, requiredChallen
 	return len(leftoverChallenges) > 0, nil
 }
 
-func (c *controller) deleteLeftoverChallenges(o *cmacme.Order, requiredChallenges []cmacme.Challenge) error {
+func (c *controller) deleteLeftoverChallenges(ctx context.Context, o *cmacme.Order, requiredChallenges []cmacme.Challenge) error {
 	leftover, err := c.determineLeftoverChallenges(o, requiredChallenges)
 	if err != nil {
 		return err
 	}
 
 	for _, ch := range leftover {
-		if err := c.cmClient.AcmeV1().Challenges(ch.Namespace).Delete(context.TODO(), ch.Name, metav1.DeleteOptions{}); err != nil {
+		if err := c.cmClient.AcmeV1().Challenges(ch.Namespace).Delete(ctx, ch.Name, metav1.DeleteOptions{}); err != nil {
 			return err
 		}
 	}
@@ -378,14 +437,14 @@ func (c *controller) deleteLeftoverChallenges(o *cmacme.Order, requiredChallenge
 	return nil
 }
 
-func (c *controller) deleteAllChallenges(o *cmacme.Order) error {
+func (c *controller) deleteAllChallenges(ctx context.Context, o *cmacme.Order) error {
 	challenges, err := c.listOwnedChallenges(o)
 	if err != nil {
 		return err
 	}
 
 	for _, ch := range challenges {
-		if err := c.cmClient.AcmeV1().Challenges(ch.Namespace).Delete(context.TODO(), ch.Name, metav1.DeleteOptions{}); err != nil {
+		if err := c.cmClient.AcmeV1().Challenges(ch.Namespace).Delete(ctx, ch.Name, metav1.DeleteOptions{}); err != nil {
 			return err
 		}
 	}
@@ -450,63 +509,76 @@ func (c *controller) finalizeOrder(ctx context.Context, cl acmecl.Interface, o *
 		derBytes = block.Bytes
 	}
 
+	// Call to CreateOrderCert finalizes the ACME order. This call can only be made once.
 	certSlice, certURL, err := cl.CreateOrderCert(ctx, o.Status.FinalizeURL, derBytes, true)
-	// if an ACME error is returned and it's a 4xx error, mark this Order as
-	// failed and do not retry it until after applying the global backoff.
-	if acmeErr, ok := err.(*acmeapi.Error); ok {
-		if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
-			log.Error(err, "failed to finalize Order resource due to bad request, marking Order as failed")
+
+	acmeErr, ok := err.(*acmeapi.Error)
+
+	// If finalizing the order returns a 403 error, the order may already be finalized.
+	// This scenario is possible if the ACME order has already been
+	// finalized in an earlier reconcile, but the reconciler failed
+	// to update the status of the Order CR.
+	// https://datatracker.ietf.org/doc/html/rfc8555#:~:text=A%20request%20to%20finalize%20an%20order%20will%20result%20in%20error,will%20indicate%20what%20action%20the%20client%20should%20take%20(see%20below).
+	if ok && acmeErr.StatusCode == 403 {
+
+		acmeOrder, getOrderErr := getACMEOrder(ctx, cl, o)
+		acmeGetOrderErr, ok := getOrderErr.(*acmeapi.Error)
+		if ok && acmeGetOrderErr.StatusCode >= 400 && acmeGetOrderErr.StatusCode < 500 {
+			log.Error(err, "failed to retrieve the ACME order (4xx error) marking Order as failed")
 			c.setOrderState(&o.Status, string(cmacme.Errored))
-			o.Status.Reason = fmt.Sprintf("Failed to finalize Order: %v", err)
+			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", err)
 			return nil
 		}
+		if getOrderErr != nil {
+			return getOrderErr
+		}
+		if acmeOrder.Status == acmeapi.StatusValid {
+			log.V(logf.DebugLevel).Info("an attempt was made to finalize an order that has already been finalized. Marking the order as valid and fetching certificate data")
+			c.setOrderState(&o.Status, string(cmacme.Valid))
+			return c.syncCertificateDataWithOrder(ctx, cl, *acmeOrder, o, issuer)
+		}
+
 	}
-	// even if any other kind of error occurred, we always update the order
-	// status after calling Finalize - this allows us to record the current
-	// order's status on this order resource despite it not being returned
-	// directly by the acme client.
-	// This will catch cases where the Order cannot be finalized because it
-	// if it is already in the 'valid' state, as upon retry we will
-	// then retrieve the Certificate resource.
+
+	// Any other ACME 4xx error means that the Order can be considered failed.
+	if ok && acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
+		log.Error(err, "failed to finalize Order resource due to bad request, marking Order as failed")
+		c.setOrderState(&o.Status, string(cmacme.Errored))
+		o.Status.Reason = fmt.Sprintf("Failed to finalize Order: %v", err)
+		return nil
+	}
+
+	// Before checking whether the call to CreateOrderCert returned a
+	// non-4xx error, ensure the order status is up-to-date.
 	_, errUpdate := c.updateOrderStatus(ctx, cl, o)
-	if acmeErr, ok := err.(*acmeapi.Error); ok {
+	if acmeErr, ok := errUpdate.(*acmeapi.Error); ok {
 		if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 			log.Error(err, "failed to update Order status due to a 4xx error, marking Order as failed")
 			c.setOrderState(&o.Status, string(cmacme.Errored))
-			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", err)
+			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", errUpdate)
 			return nil
 		}
 	}
 	if errUpdate != nil {
 		return fmt.Errorf("error syncing order status: %v", errUpdate)
 	}
-	// check for errors from FinalizeOrder
+	// Check for non-4xx errors from CreateOrderCert
 	if err != nil {
 		return fmt.Errorf("error finalizing order: %v", err)
 	}
 
 	if issuer.GetSpec().ACME != nil && issuer.GetSpec().ACME.PreferredChain != "" {
-		altBundles, err := cl.FetchCertAlternatives(ctx, certURL, true)
+		preferredChain := issuer.GetSpec().ACME.PreferredChain
+		found, altChain, err := getAltCertChain(ctx, cl, certURL, preferredChain)
 		if err != nil {
-			return fmt.Errorf("error fetching alternate certificates: %w", err)
+			return fmt.Errorf("error retrieving alternate chain: %w", err)
 		}
-		for _, altBundle := range altBundles {
-			for _, certPEM := range altBundle {
-				cert, err := x509.ParseCertificate(certPEM)
-				if err != nil {
-					return fmt.Errorf("error parsing alternate certificates: %w", err)
-				}
-
-				log.V(logf.DebugLevel).WithValues("Issuer CN", cert.Issuer.CommonName).Info("Found alternative ACME bundle")
-				if cert.Issuer.CommonName == issuer.GetSpec().ACME.PreferredChain {
-					// if the issuer's CN matched the preferred chain it means this bundle is
-					// signed by the requested chain
-					return c.storeCertificateOnStatus(ctx, o, altBundle)
-				}
-			}
+		if found {
+			return c.storeCertificateOnStatus(ctx, o, altChain)
 		}
 		// if no match is found we return to the actual cert
 		// it is a *preferred* chain after all
+		log.V(logf.DebugLevel).Info(fmt.Sprintf("Preferred chain %s not found, fall back to the default cert", preferredChain))
 	}
 
 	return c.storeCertificateOnStatus(ctx, o, certSlice)
@@ -532,7 +604,9 @@ func (c *controller) storeCertificateOnStatus(ctx context.Context, o *cmacme.Ord
 	return nil
 }
 
-func (c *controller) fetchCertificateData(ctx context.Context, cl acmecl.Interface, o *cmacme.Order) error {
+// syncCertificateData fetches the issued certificate data from ACME and stores
+// it on Order's status.
+func (c *controller) syncCertificateData(ctx context.Context, cl acmecl.Interface, o *cmacme.Order, issuer cmapi.GenericIssuer) error {
 	log := logf.FromContext(ctx)
 	acmeOrder, err := c.updateOrderStatus(ctx, cl, o)
 	if acmeErr, ok := err.(*acmeapi.Error); ok {
@@ -551,13 +625,26 @@ func (c *controller) fetchCertificateData(ctx context.Context, cl acmecl.Interfa
 		return nil
 	}
 
-	// If the Order state has actually changed and we've not observed it,
-	// update the order status and let the change in the resource trigger
-	// a resync
+	return c.syncCertificateDataWithOrder(ctx, cl, *acmeOrder, o, issuer)
+}
+
+func (c *controller) syncCertificateDataWithOrder(ctx context.Context, cl acmecl.Interface, acmeOrder acmeapi.Order, o *cmacme.Order, issuer cmapi.GenericIssuer) error {
+	log := logf.FromContext(ctx)
+	// Certificate data can only be fetched for a valid order
 	if acmeOrder.Status != acmeapi.StatusValid {
 		return nil
 	}
 
+	if issuer.GetSpec().ACME != nil && issuer.GetSpec().ACME.PreferredChain != "" {
+		found, altCerts, err := getAltCertChain(ctx, cl, acmeOrder.CertURL, issuer.GetSpec().ACME.PreferredChain)
+		if err != nil {
+			return err
+		}
+		if found {
+			return c.storeCertificateOnStatus(ctx, o, altCerts)
+		}
+
+	}
 	certs, err := cl.FetchCert(ctx, acmeOrder.CertURL, true)
 	if acmeErr, ok := err.(*acmeapi.Error); ok {
 		if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
@@ -577,4 +664,67 @@ func (c *controller) fetchCertificateData(ctx context.Context, cl acmecl.Interfa
 	}
 
 	return nil
+}
+
+// getACMEOrder returns the ACME Order for an Order Custom Resource.
+func getACMEOrder(ctx context.Context, cl acmecl.Interface, o *cmacme.Order) (*acmeapi.Order, error) {
+	log := logf.FromContext(ctx)
+	if o.Status.URL == "" {
+		return nil, fmt.Errorf("internal error: order URL not set")
+	}
+
+	log.V(logf.DebugLevel).Info("Fetching Order metadata from ACME server")
+	acmeOrder, err := cl.GetOrder(ctx, o.Status.URL)
+	if err != nil {
+		return nil, err
+	}
+
+	log.V(logf.DebugLevel).Info("Retrieved ACME order from server", "raw_data", acmeOrder)
+	return acmeOrder, nil
+}
+
+func getAltCertChain(ctx context.Context, cl acmecl.Interface, certURL string, preferredChain string) (bool, [][]byte, error) {
+	log := logf.FromContext(ctx)
+	altURLs, err := cl.ListCertAlternates(ctx, certURL)
+	if err != nil {
+		return false, nil, fmt.Errorf("error listing alternate certificate URLs: %w", err)
+	}
+	// Loop over all alternative chains
+	for _, altURL := range altURLs {
+		altChain, err := cl.FetchCert(ctx, altURL, true)
+		if err != nil {
+			return false, nil, fmt.Errorf("error fetching alternate certificate chain from %s: %w", altURL, err)
+		}
+		// Loop over each cert in this alternative chain
+		for _, altCert := range altChain {
+			cert, err := x509.ParseCertificate(altCert)
+			if err != nil {
+				return false, nil, fmt.Errorf("error parsing alternate certificate chain: %w", err)
+			}
+			log.V(logf.DebugLevel).WithValues("Issuer CN", cert.Issuer.CommonName).Info("Found alternative ACME bundle")
+			if cert.Issuer.CommonName == preferredChain {
+				// if the issuer's CN matched the preferred chain it means this bundle is
+				// signed by the requested chain
+				log.V(logf.DebugLevel).WithValues("Issuer CN", cert.Issuer.CommonName).Info("Selecting alternative ACME bundle with a matching Common Name from %s", altURL)
+				return true, altChain, nil
+			}
+		}
+	}
+	return false, nil, nil
+
+}
+
+// updateOrApplyStatus will update the order status.
+// If the ServerSideApply feature is enabled, the managed fields will instead
+// get applied using the relevant Patch API call.
+func (c *controller) updateOrApplyStatus(ctx context.Context, order *cmacme.Order) error {
+	if utilfeature.DefaultFeatureGate.Enabled(feature.ServerSideApply) {
+		return internalorders.ApplyStatus(ctx, c.cmClient, c.fieldManager, &cmacme.Order{
+			ObjectMeta: metav1.ObjectMeta{Namespace: order.Namespace, Name: order.Name},
+			Status:     *order.Status.DeepCopy(),
+		})
+	} else {
+		_, err := c.cmClient.AcmeV1().Orders(order.Namespace).UpdateStatus(ctx, order, metav1.UpdateOptions{})
+		return err
+	}
 }

@@ -17,7 +17,7 @@ import (
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/dns/v1"
 
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/util"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/util"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -109,6 +109,10 @@ func TestLiveGoogleCloudCleanUp(t *testing.T) {
 }
 
 func TestDNSProvider_getHostedZone(t *testing.T) {
+	if !gcloudLiveTest {
+		t.Skip("skipping live test")
+	}
+
 	testProvider, err := NewDNSProviderCredentials("my-project", util.RecursiveNameservers, "test-zone")
 	assert.NoError(t, err)
 

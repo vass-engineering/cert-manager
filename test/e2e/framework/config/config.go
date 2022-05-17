@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,10 +21,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/spf13/pflag"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/clientcmd"
+
+	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 )
+
+var featureGates string
 
 type Config struct {
 	KubeConfig  string
@@ -38,10 +44,9 @@ type Config struct {
 	// require access to repo files, such as Helm charts and test fixtures.
 	RepoRoot string
 
-	Ginkgo    Ginkgo
-	Framework Framework
-	Addons    Addons
-	Suite     Suite
+	Ginkgo Ginkgo
+	Addons Addons
+	Suite  Suite
 }
 
 func (c *Config) Validate() error {
@@ -54,9 +59,16 @@ func (c *Config) Validate() error {
 	}
 
 	errs = append(errs, c.Ginkgo.Validate()...)
-	errs = append(errs, c.Framework.Validate()...)
 	errs = append(errs, c.Addons.Validate()...)
 	errs = append(errs, c.Suite.Validate()...)
+
+	// Apply feature gate flag on the actual shared feature gate map using a
+	// pflag set with the copied value.
+	ps := pflag.NewFlagSet("", pflag.ContinueOnError)
+	utilfeature.DefaultMutableFeatureGate.AddFlag(ps)
+	if err := ps.Parse([]string{"--feature-gates=" + flag.CommandLine.Lookup("feature-gates").Value.String()}); err != nil {
+		errs = append(errs, fmt.Errorf("failed to parse --feature-gates flag: %w", err))
+	}
 
 	return utilerrors.NewAggregate(errs)
 }
@@ -80,8 +92,13 @@ func (c *Config) AddFlags(fs *flag.FlagSet) {
 	// TODO: get rid of this variable by bundling required files as part of test suite
 	fs.StringVar(&c.RepoRoot, "repo-root", "", "Path to the root of the repository, used for access to repo-homed test fixtures.")
 
+	// Register own feature gates flag since component-base uses pflag and we are
+	// using flag stdlib.
+	fs.StringVar(&featureGates, "feature-gates", "",
+		"A set of key=value pairs that describe feature gates for alpha/experimental features. "+
+			"Options are:\n"+strings.Join(utilfeature.DefaultMutableFeatureGate.KnownFeatures(), ", ")+"\n")
+
 	c.Ginkgo.AddFlags(fs)
-	c.Framework.AddFlags(fs)
 	c.Addons.AddFlags(fs)
 	c.Suite.AddFlags(fs)
 }

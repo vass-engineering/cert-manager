@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,8 +25,8 @@ import (
 
 	"github.com/Venafi/vcert/v4/pkg/certificate"
 
-	"github.com/jetstack/cert-manager/pkg/issuer/venafi/client/api"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client/api"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 // ErrCustomFieldsType provides a common error structure for an invalid Venafi custom field type
@@ -49,9 +49,7 @@ func (v *Venafi) RequestCertificate(csrPEM []byte, duration time.Duration, custo
 	if err != nil {
 		return "", err
 	}
-	// Send the certificate signing request to Venafi
-	requestID, err := v.vcertClient.RequestCertificate(vreq)
-	return requestID, err
+	return v.vcertClient.RequestCertificate(vreq)
 }
 
 func (v *Venafi) RetrieveCertificate(pickupID string, csrPEM []byte, duration time.Duration, customFields []api.CustomField) ([]byte, error) {
@@ -140,7 +138,6 @@ func convertCustomFieldsToVcert(customFields []api.CustomField) ([]certificate.C
 			switch field.Type {
 			case api.CustomFieldTypePlain, "":
 				fieldType = certificate.CustomFieldPlain
-				break
 			default:
 				return nil, ErrCustomFieldsType{Type: field.Type}
 			}
@@ -158,6 +155,7 @@ func convertCustomFieldsToVcert(customFields []api.CustomField) ([]certificate.C
 
 func newVRequest(cert *x509.Certificate) *certificate.Request {
 	req := certificate.NewRequest(cert)
+	req.ChainOption = certificate.ChainOptionRootLast
 
 	// overwrite entire Subject block
 	req.Subject = cert.Subject
@@ -165,7 +163,7 @@ func newVRequest(cert *x509.Certificate) *certificate.Request {
 	req.CustomFields = []certificate.CustomField{
 		{
 			Type:  certificate.CustomFieldOrigin,
-			Value: "Jetstack cert-manager",
+			Value: "cert-manager",
 		},
 	}
 	return req

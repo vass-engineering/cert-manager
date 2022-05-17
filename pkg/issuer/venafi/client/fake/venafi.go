@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import (
 
 	"github.com/Venafi/vcert/v4/pkg/endpoint"
 
-	"github.com/jetstack/cert-manager/pkg/issuer/venafi/client/api"
+	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client/api"
 )
 
 type Venafi struct {

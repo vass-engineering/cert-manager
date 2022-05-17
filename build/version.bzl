@@ -1,4 +1,4 @@
-# Copyright 2020 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,10 +13,10 @@
 # limitations under the License.
 
 # Implements hack/lib/version.sh's kube::version::ldflags() for Bazel.
-def version_x_defs(variant = None):
+def version_x_defs(x_defs, variant = None):
     # This should match the list of packages in kube::version::ldflag
     stamp_pkgs = [
-        "github.com/jetstack/cert-manager/pkg/util",
+        "github.com/cert-manager/cert-manager/pkg/util",
     ]
 
     # This should match the list of vars in kube::version::ldflags
@@ -28,7 +28,6 @@ def version_x_defs(variant = None):
     }
 
     # Generate the cross-product.
-    x_defs = {}
     for pkg in stamp_pkgs:
         for (var, val) in stamp_vars.items():
             x_defs["%s.%s" % (pkg, var)] = val

@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,8 +29,6 @@ import (
 	"sync"
 	"time"
 
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -44,9 +42,10 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/internal/apis/meta"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	cmmeta "github.com/cert-manager/cert-manager/internal/apis/meta"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 // DynamicAuthority manages a certificate authority stored in a Secret resource
@@ -72,7 +71,7 @@ type DynamicAuthority struct {
 	LeafDuration time.Duration
 
 	// Logger to write messages to.
-	Log logr.Logger
+	log logr.Logger
 
 	lister corelisters.SecretNamespaceLister
 	client coreclientset.SecretInterface
@@ -92,7 +91,8 @@ type SignFunc func(template *x509.Certificate) (*x509.Certificate, error)
 
 var _ SignFunc = (&DynamicAuthority{}).Sign
 
-func (d *DynamicAuthority) Run(stopCh <-chan struct{}) error {
+func (d *DynamicAuthority) Run(ctx context.Context) error {
+	d.log = logf.FromContext(ctx)
 	if d.SecretNamespace == "" {
 		return fmt.Errorf("SecretNamespace must be set")
 	}
@@ -129,8 +129,8 @@ func (d *DynamicAuthority) Run(stopCh <-chan struct{}) error {
 	d.client = cl.CoreV1().Secrets(d.SecretNamespace)
 
 	// start the informers and wait for the cache to sync
-	factory.Start(stopCh)
-	if !cache.WaitForCacheSync(stopCh, informer.HasSynced) {
+	factory.Start(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 		return fmt.Errorf("failed waiting for informer caches to sync")
 	}
 
@@ -138,15 +138,23 @@ func (d *DynamicAuthority) Run(stopCh <-chan struct{}) error {
 	// been  missed that could cause us to get into an idle state where the
 	// Secret resource does not exist and so the informers handler functions
 	// are not triggered.
-	return wait.PollImmediateUntil(time.Second*10, func() (done bool, err error) {
-		ctx := context.Background()
+	if err = wait.PollImmediateUntil(time.Second*10, func() (done bool, err error) {
 		if err := d.ensureCA(ctx); err != nil {
-			d.Log.Error(err, "error ensuring CA")
+			d.log.Error(err, "error ensuring CA")
 		}
 		// never return 'done'.
 		// this poll only ends when stopCh is closed.
 		return false, nil
-	}, stopCh)
+	}, ctx.Done()); err != nil {
+		// If error cause was context, return that error instead
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 // Sign will sign the given certificate template using the current version of
@@ -210,6 +218,7 @@ func (d *DynamicAuthority) WatchRotation(stopCh <-chan struct{}) <-chan struct{}
 	ch := make(chan struct{}, 1)
 	d.watches = append(d.watches, ch)
 	go func() {
+		defer close(ch)
 		<-stopCh
 		d.watchMutex.Lock()
 		defer d.watchMutex.Unlock()
@@ -247,7 +256,7 @@ func (d *DynamicAuthority) notifyWatches(newCertData, newPrivateKeyData []byte) 
 		return
 	}
 
-	d.Log.V(logf.DebugLevel).Info("Detected change in CA secret data, notifying watchers...")
+	d.log.V(logf.DebugLevel).Info("Detected change in CA secret data, notifying watchers...")
 
 	d.watchMutex.Lock()
 	defer d.watchMutex.Unlock()
@@ -276,7 +285,7 @@ func (d *DynamicAuthority) caRequiresRegeneration(s *corev1.Secret) bool {
 	pkData := s.Data[corev1.TLSPrivateKeyKey]
 	certData := s.Data[corev1.TLSCertKey]
 	if len(caData) == 0 || len(pkData) == 0 || len(certData) == 0 {
-		d.Log.V(logf.InfoLevel).Info("Missing data in CA secret. Regenerating")
+		d.log.V(logf.InfoLevel).Info("Missing data in CA secret. Regenerating")
 		return true
 	}
 	// ensure that the ca.crt and tls.crt keys are equal
@@ -285,22 +294,22 @@ func (d *DynamicAuthority) caRequiresRegeneration(s *corev1.Secret) bool {
 	}
 	cert, err := tls.X509KeyPair(certData, pkData)
 	if err != nil {
-		d.Log.Error(err, "Failed to parse data in CA secret. Regenerating")
+		d.log.Error(err, "Failed to parse data in CA secret. Regenerating")
 		return true
 	}
 
 	x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
-		d.Log.Error(err, "internal error parsing x509 certificate")
+		d.log.Error(err, "internal error parsing x509 certificate")
 		return true
 	}
 	if !x509Cert.IsCA {
-		d.Log.V(logf.InfoLevel).Info("Stored certificate is not marked as a CA. Regenerating...")
+		d.log.V(logf.InfoLevel).Info("Stored certificate is not marked as a CA. Regenerating...")
 		return true
 	}
 	// renew the root CA when the current one is 2/3 of the way through its life
 	if x509Cert.NotAfter.Sub(time.Now()) < (d.CADuration / 3) {
-		d.Log.V(logf.InfoLevel).Info("Root CA certificate is nearing expiry. Regenerating...")
+		d.log.V(logf.InfoLevel).Info("Root CA certificate is nearing expiry. Regenerating...")
 		return true
 	}
 	return false
@@ -312,7 +321,7 @@ var serialNumberLimit = new(big.Int).Lsh(big.NewInt(1), 128)
 // If the provided Secret is nil, a new secret resource will be Created.
 // Otherwise, the provided resource will be modified and Updated.
 func (d *DynamicAuthority) regenerateCA(ctx context.Context, s *corev1.Secret) error {
-	d.Log.V(logf.DebugLevel).Info("Generating new root CA")
+	d.log.V(logf.DebugLevel).Info("Generating new root CA")
 	pk, err := pki.GenerateECPrivateKey(384)
 	if err != nil {
 		return err
@@ -327,7 +336,7 @@ func (d *DynamicAuthority) regenerateCA(ctx context.Context, s *corev1.Secret) e
 		return err
 	}
 	cert := &x509.Certificate{
-		Version:               3,
+		Version:               2,
 		BasicConstraintsValid: true,
 		SerialNumber:          serialNumber,
 		PublicKeyAlgorithm:    x509.ECDSA,
@@ -376,27 +385,27 @@ func (d *DynamicAuthority) regenerateCA(ctx context.Context, s *corev1.Secret) e
 	if _, err := d.client.Update(ctx, s, metav1.UpdateOptions{}); err != nil {
 		return err
 	}
-	d.Log.V(logf.DebugLevel).Info("Generated new root CA")
+	d.log.V(logf.DebugLevel).Info("Generated new root CA")
 	return nil
 }
 
 func (d *DynamicAuthority) handleAdd(obj interface{}) {
 	ctx := context.Background()
 	if err := d.ensureCA(ctx); err != nil {
-		d.Log.Error(err, "error ensuring CA")
+		d.log.Error(err, "error ensuring CA")
 	}
 }
 
 func (d *DynamicAuthority) handleUpdate(_, obj interface{}) {
 	ctx := context.Background()
 	if err := d.ensureCA(ctx); err != nil {
-		d.Log.Error(err, "error ensuring CA")
+		d.log.Error(err, "error ensuring CA")
 	}
 }
 
 func (d *DynamicAuthority) handleDelete(obj interface{}) {
 	ctx := context.Background()
 	if err := d.ensureCA(ctx); err != nil {
-		d.Log.Error(err, "error ensuring CA")
+		d.log.Error(err, "error ensuring CA")
 	}
 }

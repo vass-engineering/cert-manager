@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,13 +22,14 @@ import (
 	"runtime/debug"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgotesting "k8s.io/client-go/testing"
 
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
 )
 
 func newFakeIssuerWithStatus(name string, status v1.IssuerStatus) *v1.Issuer {
@@ -52,7 +53,10 @@ func TestUpdateIssuerStatus(t *testing.T) {
 	defer b.Stop()
 
 	c := &controller{}
-	c.Register(b.Context)
+
+	_, _, err := c.Register(b.Context)
+	require.NoError(t, err)
+
 	b.Start()
 
 	cmClient := b.FakeCMClient()
@@ -76,7 +80,7 @@ func TestUpdateIssuerStatus(t *testing.T) {
 
 	issuerCopy := issuer.DeepCopy()
 	issuerCopy.Status = newStatus
-	_, err = c.updateIssuerStatus(issuer, issuerCopy)
+	err = c.updateIssuerStatus(context.TODO(), issuer, issuerCopy)
 	assertErrIsNil(t, fatalf, err)
 
 	actions := filter(cmClient.Actions())

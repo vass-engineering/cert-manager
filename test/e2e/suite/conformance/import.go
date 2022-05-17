@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,11 +17,17 @@ limitations under the License.
 package conformance
 
 import (
-	_ "github.com/jetstack/cert-manager/test/e2e/suite/conformance/certificates/acme"
-	_ "github.com/jetstack/cert-manager/test/e2e/suite/conformance/certificates/ca"
-	_ "github.com/jetstack/cert-manager/test/e2e/suite/conformance/certificates/selfsigned"
-	_ "github.com/jetstack/cert-manager/test/e2e/suite/conformance/certificates/vault"
-	_ "github.com/jetstack/cert-manager/test/e2e/suite/conformance/certificates/venafi"
-	_ "github.com/jetstack/cert-manager/test/e2e/suite/conformance/certificates/venaficloud"
-	_ "github.com/jetstack/cert-manager/test/e2e/suite/conformance/rbac"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificates/acme"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificates/ca"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificates/external"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificates/selfsigned"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificates/vault"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificates/venafi"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificates/venaficloud"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificatesigningrequests/acme"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificatesigningrequests/ca"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificatesigningrequests/selfsigned"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificatesigningrequests/vault"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/certificatesigningrequests/venafi"
+	_ "github.com/cert-manager/cert-manager/test/e2e/suite/conformance/rbac"
 )

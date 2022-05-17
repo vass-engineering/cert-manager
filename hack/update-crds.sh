@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2019 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,6 +38,11 @@ export PATH=$(dirname "$go"):$PATH
 # This script should be run via `bazel run //hack:update-crds`
 REPO_ROOT=${BUILD_WORKSPACE_DIRECTORY}
 cd "${REPO_ROOT}"
+
+"$controllergen" \
+    crd \
+    paths=./pkg/webhook/handlers/testdata/apis/testgroup/v{1,2}/... \
+    output:crd:dir=./pkg/webhook/handlers/testdata/apis/testgroup/crds
 
 "$controllergen" \
   schemapatch:manifests=./deploy/crds \

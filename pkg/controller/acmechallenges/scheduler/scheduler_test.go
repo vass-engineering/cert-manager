@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,14 +23,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/diff"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	"github.com/jetstack/cert-manager/pkg/client/clientset/versioned/fake"
-	cminformers "github.com/jetstack/cert-manager/pkg/client/informers/externalversions"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	"github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/fake"
+	cminformers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 const maxConcurrentChallenges = 60
@@ -81,7 +82,8 @@ func BenchmarkScheduleAscending(b *testing.B) {
 			s := &Scheduler{}
 			b.ResetTimer()
 			for n := 0; n < b.N; n++ {
-				s.scheduleN(30, chs)
+				_, err := s.scheduleN(30, chs)
+				require.NoError(b, err)
 			}
 		})
 	}
@@ -95,7 +97,8 @@ func BenchmarkScheduleRandom(b *testing.B) {
 			s := &Scheduler{}
 			b.ResetTimer()
 			for n := 0; n < b.N; n++ {
-				s.scheduleN(30, chs)
+				_, err := s.scheduleN(30, chs)
+				require.NoError(b, err)
 			}
 		})
 	}
@@ -109,7 +112,8 @@ func BenchmarkScheduleDuplicates(b *testing.B) {
 			s := &Scheduler{}
 			b.ResetTimer()
 			for n := 0; n < b.N; n++ {
-				s.scheduleN(30, chs)
+				_, err := s.scheduleN(30, chs)
+				require.NoError(b, err)
 			}
 		})
 	}
@@ -311,7 +315,8 @@ func TestScheduleN(t *testing.T) {
 			factory := cminformers.NewSharedInformerFactory(cl, 0)
 			challengesInformer := factory.Acme().V1().Challenges()
 			for _, ch := range test.challenges {
-				challengesInformer.Informer().GetIndexer().Add(ch)
+				err := challengesInformer.Informer().GetIndexer().Add(ch)
+				require.NoError(t, err)
 			}
 
 			s := New(context.Background(), challengesInformer.Lister(), maxConcurrentChallenges)

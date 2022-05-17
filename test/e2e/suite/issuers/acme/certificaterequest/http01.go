@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ package certificate
 import (
 	"context"
 	"crypto/x509"
-	"fmt"
 	"strings"
 	"time"
 
@@ -29,15 +28,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	cmutil "github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/test/e2e/framework"
-	"github.com/jetstack/cert-manager/test/e2e/framework/log"
-	. "github.com/jetstack/cert-manager/test/e2e/framework/matcher"
-	frameworkutil "github.com/jetstack/cert-manager/test/e2e/framework/util"
-	"github.com/jetstack/cert-manager/test/e2e/util"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/test/e2e/framework"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
+	. "github.com/cert-manager/cert-manager/test/e2e/framework/matcher"
+	"github.com/cert-manager/cert-manager/test/e2e/util"
+	e2eutil "github.com/cert-manager/cert-manager/test/e2e/util"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 var _ = framework.CertManagerDescribe("ACME CertificateRequest (HTTP01)", func() {
@@ -53,8 +52,7 @@ var _ = framework.CertManagerDescribe("ACME CertificateRequest (HTTP01)", func()
 	fixedIngressName := "testingress"
 
 	BeforeEach(func() {
-		acmeIssuer := util.NewCertManagerACMEIssuer(issuerName, f.Config.Addons.ACMEServer.URL, testingACMEEmail, testingACMEPrivateKey)
-		acmeIssuer.Spec.ACME.Solvers = []cmacme.ACMEChallengeSolver{
+		solvers := []cmacme.ACMEChallengeSolver{
 			{
 				HTTP01: &cmacme.ACMEChallengeSolverHTTP01{
 					Ingress: &cmacme.ACMEChallengeSolverHTTP01Ingress{
@@ -75,6 +73,13 @@ var _ = framework.CertManagerDescribe("ACME CertificateRequest (HTTP01)", func()
 				},
 			},
 		}
+		acmeIssuer := gen.Issuer(issuerName,
+			gen.SetIssuerNamespace(f.Namespace.Name),
+			gen.SetIssuerACMEEmail(testingACMEEmail),
+			gen.SetIssuerACMEURL(f.Config.Addons.ACMEServer.URL),
+			gen.SetIssuerACMEPrivKeyRef(testingACMEPrivateKey),
+			gen.SetIssuerACMESkipTLSVerify(true),
+			gen.SetIssuerACMESolvers(solvers))
 		By("Creating an Issuer")
 		_, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), acmeIssuer, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
@@ -105,7 +110,7 @@ var _ = framework.CertManagerDescribe("ACME CertificateRequest (HTTP01)", func()
 	})
 
 	JustBeforeEach(func() {
-		acmeIngressDomain = frameworkutil.RandomSubdomain(f.Config.Addons.IngressController.Domain)
+		acmeIngressDomain = e2eutil.RandomSubdomain(f.Config.Addons.IngressController.Domain)
 	})
 
 	AfterEach(func() {
@@ -152,7 +157,10 @@ var _ = framework.CertManagerDescribe("ACME CertificateRequest (HTTP01)", func()
 		const maxLengthOfDomainSegment = 63
 		By("Creating a CertificateRequest")
 		cr, key, err := util.NewCertManagerBasicCertificateRequest(certificateRequestName, issuerName, v1.IssuerKind, nil,
-			[]string{acmeIngressDomain, fmt.Sprintf("%s.%s", cmutil.RandStringRunes(maxLengthOfDomainSegment), acmeIngressDomain)},
+			[]string{
+				acmeIngressDomain,
+				e2eutil.RandomSubdomainLength(acmeIngressDomain, maxLengthOfDomainSegment),
+			},
 			nil, nil, x509.RSA)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -167,7 +175,7 @@ var _ = framework.CertManagerDescribe("ACME CertificateRequest (HTTP01)", func()
 
 		By("Creating a CertificateRequest")
 		cr, key, err := util.NewCertManagerBasicCertificateRequest(certificateRequestName, issuerName, v1.IssuerKind, nil,
-			[]string{fmt.Sprintf("%s.%s", cmutil.RandStringRunes(5), acmeIngressDomain)},
+			[]string{e2eutil.RandomSubdomain(acmeIngressDomain)},
 			nil, nil, x509.RSA)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -210,16 +218,18 @@ var _ = framework.CertManagerDescribe("ACME CertificateRequest (HTTP01)", func()
 		By("killing the solver pod")
 		podClient := f.KubeClientSet.CoreV1().Pods(f.Namespace.Name)
 		var pod corev1.Pod
-		err = wait.PollImmediate(1*time.Second, time.Minute,
+		logf, done := log.LogBackoff()
+		defer done()
+		err = wait.PollImmediate(1*time.Second, time.Minute*3,
 			func() (bool, error) {
-				log.Logf("Waiting for solver pod to exist")
+				logf("Waiting for solver pod to exist")
 				podlist, err := podClient.List(context.TODO(), metav1.ListOptions{})
 				if err != nil {
 					return false, err
 				}
 
 				for _, p := range podlist.Items {
-					log.Logf("solver pod %s", p.Name)
+					logf("solver pod %s", p.Name)
 					// TODO(dmo): make this cleaner instead of just going by name
 					if strings.Contains(p.Name, "http-solver") {
 						pod = p

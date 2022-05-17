@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,16 +29,11 @@ type StringGenerator func(n int) string
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyz0123456789"
 
+// RandStringBytes generates a pseudo-random string of length `n`.
 func RandStringBytes(n int) string {
 	b := make([]byte, n)
 	for i := range b {
 		b[i] = letterBytes[rand.Intn(len(letterBytes))]
 	}
 	return string(b)
-}
-
-func FixedString(s string) StringGenerator {
-	return func(n int) string {
-		return s
-	}
 }

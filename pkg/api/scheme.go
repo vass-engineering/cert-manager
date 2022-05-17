@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,25 +17,25 @@ limitations under the License.
 package api
 
 import (
-	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	kscheme "k8s.io/client-go/kubernetes/scheme"
-	apireg "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1beta1"
+	apireg "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 
-	whapi "github.com/jetstack/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
-	cmacmev1 "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	cmacmev1alpha2 "github.com/jetstack/cert-manager/pkg/apis/acme/v1alpha2"
-	cmacmev1alpha3 "github.com/jetstack/cert-manager/pkg/apis/acme/v1alpha3"
-	cmacmev1beta1 "github.com/jetstack/cert-manager/pkg/apis/acme/v1beta1"
-	cmapiv1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmapiv1alpha2 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1alpha2"
-	cmapiv1alpha3 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1alpha3"
-	cmapiv1beta1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1beta1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
+	cmacmev1alpha2 "github.com/cert-manager/cert-manager/internal/apis/acme/v1alpha2"
+	cmacmev1alpha3 "github.com/cert-manager/cert-manager/internal/apis/acme/v1alpha3"
+	cmacmev1beta1 "github.com/cert-manager/cert-manager/internal/apis/acme/v1beta1"
+	cmapiv1alpha2 "github.com/cert-manager/cert-manager/internal/apis/certmanager/v1alpha2"
+	cmapiv1alpha3 "github.com/cert-manager/cert-manager/internal/apis/certmanager/v1alpha3"
+	cmapiv1beta1 "github.com/cert-manager/cert-manager/internal/apis/certmanager/v1beta1"
+	whapi "github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
+	cmacmev1 "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmapiv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 )
 
 // This package defines a Scheme and Codec that has the *external* API types

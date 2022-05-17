@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,8 +32,8 @@ import (
 	"strings"
 	"time"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 )
 
 func IPAddressesForCertificate(crt *v1.Certificate) []net.IP {
@@ -211,7 +211,10 @@ func GenerateCSR(crt *v1.Certificate) (*x509.CertificateRequest, error) {
 	}
 
 	return &x509.CertificateRequest{
-		Version:            3,
+		// Version 0 is the only one defined in the PKCS#10 standard, RFC2986.
+		// This value isn't used by Go at the time of writing.
+		// https://datatracker.ietf.org/doc/html/rfc2986#section-4
+		Version:            0,
 		SignatureAlgorithm: sigAlgo,
 		PublicKeyAlgorithm: pubKeyAlgo,
 		Subject: pkix.Name{
@@ -301,7 +304,11 @@ func GenerateTemplate(crt *v1.Certificate) (*x509.Certificate, error) {
 	}
 
 	return &x509.Certificate{
-		Version:               3,
+		// Version must be 2 according to RFC5280.
+		// A version value of 2 confusingly means version 3.
+		// This value isn't used by Go at the time of writing.
+		// https://datatracker.ietf.org/doc/html/rfc5280#section-4.1.2.1
+		Version:               2,
 		BasicConstraintsValid: true,
 		SerialNumber:          serialNumber,
 		PublicKeyAlgorithm:    pubKeyAlgo,
@@ -369,7 +376,11 @@ func GenerateTemplateFromCSRPEMWithUsages(csrPEM []byte, duration time.Duration,
 	}
 
 	return &x509.Certificate{
-		Version:               csr.Version,
+		// Version must be 2 according to RFC5280.
+		// A version value of 2 confusingly means version 3.
+		// This value isn't used by Go at the time of writing.
+		// https://datatracker.ietf.org/doc/html/rfc5280#section-4.1.2.1
+		Version:               2,
 		BasicConstraintsValid: true,
 		SerialNumber:          serialNumber,
 		PublicKeyAlgorithm:    csr.PublicKeyAlgorithm,
@@ -388,8 +399,8 @@ func GenerateTemplateFromCSRPEMWithUsages(csrPEM []byte, duration time.Duration,
 	}, nil
 }
 
-// SignCertificate returns a signed x509.Certificate object for the given
-// *v1.Certificate crt.
+// SignCertificate returns a signed *x509.Certificate given a template
+// *x509.Certificate crt and an issuer.
 // publicKey is the public key of the signee, and signerKey is the private
 // key of the signer.
 // It returns a PEM encoded copy of the Certificate as well as a *x509.Certificate
@@ -418,34 +429,25 @@ func SignCertificate(template *x509.Certificate, issuerCert *x509.Certificate, p
 // SignCSRTemplate signs a certificate template usually based upon a CSR. This
 // function expects all fields to be present in the certificate template,
 // including it's public key.
-// It returns the certificate data followed by the CA data, encoded in PEM format.
-func SignCSRTemplate(caCerts []*x509.Certificate, caKey crypto.Signer, template *x509.Certificate) ([]byte, []byte, error) {
+// It returns the PEM bundle containing certificate data and the CA data, encoded in PEM format.
+func SignCSRTemplate(caCerts []*x509.Certificate, caKey crypto.Signer, template *x509.Certificate) (PEMBundle, error) {
 	if len(caCerts) == 0 {
-		return nil, nil, errors.New("no CA certificates given to sign CSR template")
+		return PEMBundle{}, errors.New("no CA certificates given to sign CSR template")
 	}
 
-	caCert := caCerts[0]
+	issuingCACert := caCerts[0]
 
-	certPem, _, err := SignCertificate(template, caCert, template.PublicKey, caKey)
+	_, cert, err := SignCertificate(template, issuingCACert, template.PublicKey, caKey)
 	if err != nil {
-		return nil, nil, err
-
+		return PEMBundle{}, err
 	}
 
-	chainPem, err := EncodeX509Chain(caCerts)
+	bundle, err := ParseSingleCertificateChain(append(caCerts, cert))
 	if err != nil {
-		return nil, nil, err
+		return PEMBundle{}, err
 	}
 
-	certPem = append(certPem, chainPem...)
-
-	// encode the CA certificate to be bundled in the output
-	caPem, err := EncodeX509(caCerts[0])
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return certPem, caPem, nil
+	return bundle, nil
 }
 
 // EncodeCSR calls x509.CreateCertificateRequest to sign the given CSR template.
@@ -459,7 +461,7 @@ func EncodeCSR(template *x509.CertificateRequest, key crypto.Signer) ([]byte, er
 	return derBytes, nil
 }
 
-// EncodeX509 will encode a *x509.Certificate into PEM format.
+// EncodeX509 will encode a single *x509.Certificate into PEM format.
 func EncodeX509(cert *x509.Certificate) ([]byte, error) {
 	caPem := bytes.NewBuffer([]byte{})
 	err := pem.Encode(caPem, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
@@ -470,14 +472,24 @@ func EncodeX509(cert *x509.Certificate) ([]byte, error) {
 	return caPem.Bytes(), nil
 }
 
-// EncodeX509Chain will encode an *x509.Certificate chain into PEM format.
+// EncodeX509Chain will encode a list of *x509.Certificates into a PEM format chain.
+// Self-signed certificates are not included as per
+// https://datatracker.ietf.org/doc/html/rfc5246#section-7.4.2
+// Certificates are output in the order they're given; if the input is not ordered
+// as specified in RFC5246 section 7.4.2, the resulting chain might not be valid
+// for use in TLS.
 func EncodeX509Chain(certs []*x509.Certificate) ([]byte, error) {
 	caPem := bytes.NewBuffer([]byte{})
 	for _, cert := range certs {
-		if bytes.Equal(cert.RawIssuer, cert.RawSubject) {
+		if cert == nil {
+			continue
+		}
+
+		if cert.CheckSignatureFrom(cert) == nil {
 			// Don't include self-signed certificate
 			continue
 		}
+
 		err := pem.Encode(caPem, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 		if err != nil {
 			return nil, err
@@ -517,6 +529,9 @@ func SignatureAlgorithm(crt *v1.Certificate) (x509.PublicKeyAlgorithm, x509.Sign
 		default:
 			return x509.UnknownPublicKeyAlgorithm, x509.UnknownSignatureAlgorithm, fmt.Errorf("unsupported rsa keysize specified: %d. min keysize %d", crt.Spec.PrivateKey.Size, MinRSAKeySize)
 		}
+	case v1.Ed25519KeyAlgorithm:
+		pubKeyAlgo = x509.Ed25519
+		sigAlgo = x509.PureEd25519
 	case v1.ECDSAKeyAlgorithm:
 		pubKeyAlgo = x509.ECDSA
 		switch crt.Spec.PrivateKey.Size {

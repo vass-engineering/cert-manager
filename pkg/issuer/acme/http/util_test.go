@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,9 +19,9 @@ package http
 import (
 	"testing"
 
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	"github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	"github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 const (
@@ -63,7 +63,11 @@ func (s *solverFixture) Setup(t *testing.T) {
 		s.Builder.T = t
 	}
 	s.Builder.Init()
-	s.Solver = buildFakeSolver(s.Builder)
+	var err error
+	s.Solver, err = buildFakeSolver(s.Builder)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if s.PreFn != nil {
 		s.PreFn(t, s)
 		s.Builder.Sync()
@@ -80,11 +84,14 @@ func (s *solverFixture) Finish(t *testing.T, args ...interface{}) {
 	}
 }
 
-func buildFakeSolver(b *test.Builder) *Solver {
+func buildFakeSolver(b *test.Builder) (*Solver, error) {
 	b.Init()
-	s := NewSolver(b.Context)
+	s, err := NewSolver(b.Context)
+	if err != nil {
+		return nil, err
+	}
 	b.Start()
-	return s
+	return s, nil
 }
 
 func strPtr(s string) *string {

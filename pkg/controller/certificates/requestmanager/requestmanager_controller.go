@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -36,22 +36,25 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/clock"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	cmclient "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
-	cminformers "github.com/jetstack/cert-manager/pkg/client/informers/externalversions"
-	cmlisters "github.com/jetstack/cert-manager/pkg/client/listers/certmanager/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/pkg/util/predicate"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
+	cminformers "github.com/cert-manager/cert-manager/pkg/client/informers/externalversions"
+	cmlisters "github.com/cert-manager/cert-manager/pkg/client/listers/certmanager/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificates"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/pkg/util/predicate"
 )
 
 const (
-	ControllerName = "CertificateRequestManager"
+	ControllerName      = "certificates-request-manager"
+	reasonRequestFailed = "RequestFailed"
+	reasonRequested     = "Requested"
 )
 
 var (
@@ -64,6 +67,13 @@ type controller struct {
 	secretLister             corelisters.SecretLister
 	client                   cmclient.Interface
 	recorder                 record.EventRecorder
+	clock                    clock.Clock
+	copiedAnnotationPrefixes []string
+
+	// fieldManager is the string which will be used as the Field Manager on
+	// fields created or edited by the cert-manager Kubernetes client during
+	// Create or Apply API calls.
+	fieldManager string
 }
 
 func NewController(
@@ -72,6 +82,9 @@ func NewController(
 	factory informers.SharedInformerFactory,
 	cmFactory cminformers.SharedInformerFactory,
 	recorder record.EventRecorder,
+	clock clock.Clock,
+	certificateControllerOptions controllerpkg.CertificateOptions,
+	fieldManager string,
 ) (*controller, workqueue.RateLimitingInterface, []cache.InformerSynced) {
 	// create a queue used to queue up items to be processed
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(time.Second*1, time.Second*30), ControllerName)
@@ -109,6 +122,9 @@ func NewController(
 		secretLister:             secretsInformer.Lister(),
 		client:                   client,
 		recorder:                 recorder,
+		clock:                    clock,
+		copiedAnnotationPrefixes: certificateControllerOptions.CopiedAnnotationPrefixes,
+		fieldManager:             fieldManager,
 	}, queue, mustSync
 }
 
@@ -124,7 +140,7 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 
 	crt, err := c.certificateLister.Certificates(namespace).Get(name)
 	if apierrors.IsNotFound(err) {
-		log.Error(err, "certificate not found for key")
+		log.V(logf.DebugLevel).Info("certificate not found for key", "error", err.Error())
 		return nil
 	}
 	if err != nil {
@@ -189,6 +205,11 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 		return err
 	}
 
+	requests, err = c.deleteCurrentFailedRequests(ctx, crt, requests...)
+	if err != nil {
+		return err
+	}
+
 	if len(requests) > 1 {
 		// TODO: we should handle this case better, but for now do nothing to
 		//  avoid getting into loops where we keep creating multiple requests
@@ -204,6 +225,47 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 	}
 
 	return c.createNewCertificateRequest(ctx, crt, pk, nextRevision, nextPrivateKeySecret.Name)
+}
+
+func (c *controller) deleteCurrentFailedRequests(ctx context.Context, crt *cmapi.Certificate, reqs ...*cmapi.CertificateRequest) ([]*cmapi.CertificateRequest, error) {
+	log := logf.FromContext(ctx).WithValues("Certificate", crt.Name)
+	var remaining []*cmapi.CertificateRequest
+	for _, req := range reqs {
+		log = logf.WithRelatedResource(log, req)
+
+		// Check if there are any 'current' CertificateRequests that
+		// failed during the previous issuance cycle. Those should be
+		// deleted so that a new one gets created and the issuance is
+		// re-tried. In practice no more than one CertificateRequest is
+		// expected at this point.
+		crReadyCond := apiutil.GetCertificateRequestCondition(req, cmapi.CertificateRequestConditionReady)
+		if crReadyCond == nil || crReadyCond.Status != cmmeta.ConditionFalse || crReadyCond.Reason != cmapi.CertificateRequestReasonFailed {
+			remaining = append(remaining, req)
+			continue
+		}
+
+		certIssuingCond := apiutil.GetCertificateCondition(crt, cmapi.CertificateConditionIssuing)
+		if certIssuingCond == nil {
+			// This should never happen
+			log.V(logf.ErrorLevel).Info("Certificate does not have Issuing condition")
+			return nil, nil
+		}
+		// If the Issuing condition on the Certificate is newer than the
+		// failure time on CertificateRequest, it means that the
+		// CertificateRequest failed during the previous issuance (for the
+		// same revision). If it is a CertificateRequest that failed
+		// during the previous issuance, then it should be deleted so
+		// that we create a new one for this issuance.
+		if req.Status.FailureTime.Before(certIssuingCond.LastTransitionTime) {
+			log.V(logf.DebugLevel).Info("Found a failed CertificateRequest for previous issuance of this revision, deleting...")
+			if err := c.client.CertmanagerV1().CertificateRequests(req.Namespace).Delete(ctx, req.Name, metav1.DeleteOptions{}); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		remaining = append(remaining, req)
+	}
+	return remaining, nil
 }
 
 func (c *controller) deleteRequestsWithoutRevision(ctx context.Context, reqs ...*cmapi.CertificateRequest) ([]*cmapi.CertificateRequest, error) {
@@ -311,10 +373,7 @@ func (c *controller) createNewCertificateRequest(ctx context.Context, crt *cmapi
 		return err
 	}
 
-	annotations := make(map[string]string)
-	for k, v := range crt.Annotations {
-		annotations[k] = v
-	}
+	annotations := controllerpkg.BuildAnnotationsToCopy(crt.Annotations, c.copiedAnnotationPrefixes)
 	annotations[cmapi.CertificateRequestRevisionAnnotationKey] = strconv.Itoa(nextRevision)
 	annotations[cmapi.CertificateRequestPrivateKeyAnnotationKey] = nextPrivateKeySecretName
 	annotations[cmapi.CertificateNameKey] = crt.Name
@@ -336,11 +395,13 @@ func (c *controller) createNewCertificateRequest(ctx context.Context, crt *cmapi
 		},
 	}
 
-	cr, err = c.client.CertmanagerV1().CertificateRequests(cr.Namespace).Create(ctx, cr, metav1.CreateOptions{})
+	cr, err = c.client.CertmanagerV1().CertificateRequests(cr.Namespace).Create(ctx, cr, metav1.CreateOptions{FieldManager: c.fieldManager})
 	if err != nil {
+		c.recorder.Eventf(crt, corev1.EventTypeWarning, reasonRequestFailed, "Failed to create CertificateRequest: "+err.Error())
 		return err
 	}
-	c.recorder.Eventf(crt, corev1.EventTypeNormal, "Requested", "Created new CertificateRequest resource %q", cr.Name)
+
+	c.recorder.Eventf(crt, corev1.EventTypeNormal, reasonRequested, "Created new CertificateRequest resource %q", cr.Name)
 	if err := c.waitForCertificateRequestToExist(cr.Namespace, cr.Name); err != nil {
 		return fmt.Errorf("failed whilst waiting for CertificateRequest to exist - this may indicate an apiserver running slowly. Request will be retried")
 	}
@@ -375,6 +436,9 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 		ctx.KubeSharedInformerFactory,
 		ctx.SharedInformerFactory,
 		ctx.Recorder,
+		ctx.Clock,
+		ctx.CertificateOptions,
+		ctx.FieldManager,
 	)
 	c.controller = ctrl
 
@@ -382,7 +446,7 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 }
 
 func init() {
-	controllerpkg.Register(ControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(ControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		return controllerpkg.NewBuilder(ctx, ControllerName).
 			For(&controllerWrapper{}).
 			Complete()

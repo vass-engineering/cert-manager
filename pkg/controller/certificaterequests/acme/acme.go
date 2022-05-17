@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,26 +25,29 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 
-	"github.com/jetstack/cert-manager/pkg/acme"
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmacmeclientset "github.com/jetstack/cert-manager/pkg/client/clientset/versioned/typed/acme/v1"
-	cmacmelisters "github.com/jetstack/cert-manager/pkg/client/listers/acme/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificaterequests"
-	crutil "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/util"
-	issuerpkg "github.com/jetstack/cert-manager/pkg/issuer"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/pkg/util/errors"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/pkg/acme"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmacmeclientset "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/typed/acme/v1"
+	cmacmelisters "github.com/cert-manager/cert-manager/pkg/client/listers/acme/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
+	crutil "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/util"
+	issuerpkg "github.com/cert-manager/cert-manager/pkg/issuer"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 const (
+	// CRControllerName is the string used to refer to
+	// this controller when enabling or disabling it from
+	// command line flags.
 	CRControllerName = "certificaterequests-issuer-acme"
 )
 
+// ACME is a controller that implements `certificaterequests.Issuer`.
 type ACME struct {
 	// used to record Events about resources to the API
 	recorder      record.EventRecorder
@@ -54,31 +57,45 @@ type ACME struct {
 	acmeClientV cmacmeclientset.AcmeV1Interface
 
 	reporter *crutil.Reporter
+
+	// fieldManager is the manager name used for Create and Apply operations.
+	fieldManager string
 }
 
 func init() {
 	// create certificate request controller for acme issuer
-	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		// watch owned Order resources and trigger resyncs of CertificateRequests
-		// that own Orders automatically
-		orderInformer := ctx.SharedInformerFactory.Acme().V1().Orders().Informer()
+		// that own Orders automatically.
 		return controllerpkg.NewBuilder(ctx, CRControllerName).
-			For(certificaterequests.New(apiutil.IssuerACME, NewACME(ctx), orderInformer)).
+			For(certificaterequests.New(
+				apiutil.IssuerACME,
+				NewACME,
+				cmacme.SchemeGroupVersion.WithResource("orders"),
+			)).
 			Complete()
 	})
 }
 
-func NewACME(ctx *controllerpkg.Context) *ACME {
+// NewACME returns a configured controller.
+func NewACME(ctx *controllerpkg.Context) certificaterequests.Issuer {
 	return &ACME{
 		recorder:      ctx.Recorder,
 		issuerOptions: ctx.IssuerOptions,
 		orderLister:   ctx.SharedInformerFactory.Acme().V1().Orders().Lister(),
 		acmeClientV:   ctx.CMClient.AcmeV1(),
 		reporter:      crutil.NewReporter(ctx.Clock, ctx.Recorder),
+		fieldManager:  ctx.FieldManager,
 	}
 }
 
-func (a *ACME) Sign(ctx context.Context, cr *v1.CertificateRequest, issuer v1.GenericIssuer) (*issuerpkg.IssueResponse, error) {
+// Sign returns a CA, certificate and Key from an ACME CA.
+//
+// If no order exists for a CertificateRequest, an order is constructed
+// and sent back to the Kubernetes API server for processing.
+// The order controller then processes the order. The CertificateRequest
+// is then updated with the result.
+func (a *ACME) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuer cmapi.GenericIssuer) (*issuerpkg.IssueResponse, error) {
 	log := logf.FromContext(ctx, "sign")
 
 	// If we can't decode the CSR PEM we have to hard fail
@@ -119,7 +136,7 @@ func (a *ACME) Sign(ctx context.Context, cr *v1.CertificateRequest, issuer v1.Ge
 	if k8sErrors.IsNotFound(err) {
 		// Failing to create the order here is most likely network related.
 		// We should backoff and keep trying.
-		_, err = a.acmeClientV.Orders(expectedOrder.Namespace).Create(context.TODO(), expectedOrder, metav1.CreateOptions{})
+		_, err = a.acmeClientV.Orders(expectedOrder.Namespace).Create(ctx, expectedOrder, metav1.CreateOptions{FieldManager: a.fieldManager})
 		if err != nil {
 			message := fmt.Sprintf("Failed create new order resource %s/%s", expectedOrder.Namespace, expectedOrder.Name)
 
@@ -165,41 +182,47 @@ func (a *ACME) Sign(ctx context.Context, cr *v1.CertificateRequest, issuer v1.Ge
 		return nil, nil
 	}
 
-	// Order valid, return cert. The calling controller will update with ready if its happy with the cert.
-	if order.Status.State == cmacme.Valid {
-		x509Cert, err := pki.DecodeX509CertificateBytes(order.Status.Certificate)
-		if errors.IsInvalidData(err) {
-			log.Error(err, "failed to decode x509 certificate data on Order resource")
-			return nil, a.acmeClientV.Orders(order.Namespace).Delete(context.TODO(), order.Name, metav1.DeleteOptions{})
-		}
-		ok, err := pki.PublicKeyMatchesCertificate(csr.PublicKey, x509Cert)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			log.Error(err, "failed to decode x509 certificate data on Order resource, recreating...")
-			return nil, a.acmeClientV.Orders(order.Namespace).Delete(context.TODO(), order.Name, metav1.DeleteOptions{})
-		}
+	if order.Status.State != cmacme.Valid {
+		// We update here to just pending while we wait for the order to be resolved.
+		a.reporter.Pending(cr, nil, "OrderPending",
+			fmt.Sprintf("Waiting on certificate issuance from order %s/%s: %q",
+				expectedOrder.Namespace, order.Name, order.Status.State))
 
-		log.V(logf.InfoLevel).Info("certificate issued")
+		log.V(logf.DebugLevel).Info("acme Order resource is not in a ready state, waiting...")
 
-		return &issuerpkg.IssueResponse{
-			Certificate: order.Status.Certificate,
-		}, nil
+		return nil, nil
 	}
 
-	// We update here to just pending while we wait for the order to be resolved.
-	a.reporter.Pending(cr, nil, "OrderPending",
-		fmt.Sprintf("Waiting on certificate issuance from order %s/%s: %q",
-			expectedOrder.Namespace, order.Name, order.Status.State))
+	if len(order.Status.Certificate) == 0 {
+		a.reporter.Pending(cr, nil, "OrderPending",
+			fmt.Sprintf("Waiting for order-controller to add certificate data to Order %s/%s",
+				expectedOrder.Namespace, order.Name))
 
-	log.V(logf.DebugLevel).Info("acme Order resource is not in a ready state, waiting...")
+		log.V(logf.DebugLevel).Info("Order controller has not added certificate data to the Order, waiting...")
+		return nil, nil
+	}
 
-	return nil, nil
+	x509Cert, err := pki.DecodeX509CertificateBytes(order.Status.Certificate)
+	if err != nil {
+		log.Error(err, "failed to decode x509 certificate data on Order resource.")
+		return nil, a.acmeClientV.Orders(order.Namespace).Delete(ctx, order.Name, metav1.DeleteOptions{})
+	}
+
+	if ok, err := pki.PublicKeyMatchesCertificate(csr.PublicKey, x509Cert); err != nil || !ok {
+		log.Error(err, "The public key in Order.Status.Certificate does not match the public key in CertificateRequest.Spec.Request. Deleting the order.")
+		return nil, a.acmeClientV.Orders(order.Namespace).Delete(ctx, order.Name, metav1.DeleteOptions{})
+	}
+
+	log.V(logf.InfoLevel).Info("certificate issued")
+
+	// Order valid, return cert. The calling controller will update with ready if its happy with the cert.
+	return &issuerpkg.IssueResponse{
+		Certificate: order.Status.Certificate,
+	}, nil
 }
 
 // Build order. If we error here it is a terminating failure.
-func buildOrder(cr *v1.CertificateRequest, csr *x509.CertificateRequest, enableDurationFeature bool) (*cmacme.Order, error) {
+func buildOrder(cr *cmapi.CertificateRequest, csr *x509.CertificateRequest, enableDurationFeature bool) (*cmacme.Order, error) {
 	var ipAddresses []string
 	for _, ip := range csr.IPAddresses {
 		ipAddresses = append(ipAddresses, ip.String())
@@ -225,7 +248,22 @@ func buildOrder(cr *v1.CertificateRequest, csr *x509.CertificateRequest, enableD
 	computeNameSpec := spec.DeepCopy()
 	// create a deep copy of the OrderSpec so we can overwrite the Request and NotAfter field
 	computeNameSpec.Request = nil
-	name, err := apiutil.ComputeName(cr.Name, computeNameSpec)
+
+	var hashObj interface{}
+	hashObj = computeNameSpec
+	if len(cr.Name) >= 52 {
+		// Pass a unique struct for hashing so that names at or longer than 52 characters
+		// receive a unique hash. Otherwise, orders will have truncated names with colliding
+		// hashes, possibly leading to non-renewal.
+		hashObj = struct {
+			CRName string            `json:"certificateRequestName"`
+			Spec   *cmacme.OrderSpec `json:"spec"`
+		}{
+			CRName: cr.Name,
+			Spec:   computeNameSpec,
+		}
+	}
+	name, err := apiutil.ComputeName(cr.Name, hashObj)
 	if err != nil {
 		return nil, err
 	}
@@ -235,12 +273,13 @@ func buildOrder(cr *v1.CertificateRequest, csr *x509.CertificateRequest, enableD
 	// the hyphen.
 	return &cmacme.Order{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   cr.Namespace,
-			Labels:      cr.Labels,
+			Name:      name,
+			Namespace: cr.Namespace,
+			Labels:    cr.Labels,
+			// Annotations include the filtered annotations copied from the Certificate.
 			Annotations: cr.Annotations,
 			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(cr, v1.SchemeGroupVersion.WithKind(v1.CertificateRequestKind)),
+				*metav1.NewControllerRef(cr, cmapi.SchemeGroupVersion.WithKind(cmapi.CertificateRequestKind)),
 			},
 		},
 		Spec: spec,

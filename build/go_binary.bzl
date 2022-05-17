@@ -1,4 +1,4 @@
-# Copyright 2020 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,9 +15,14 @@
 load(":version.bzl", "version_x_defs")
 load("@io_bazel_rules_go//go:def.bzl", real_go_binary = "go_binary")
 
-def go_binary(name, **kwargs):
+def go_binary(name, x_defs, **kwargs):
     real_go_binary(
         name = name,
-        x_defs = version_x_defs(),
+        x_defs = version_x_defs(x_defs),
+        # reduce the go binary size with this simple trick
+        # (https://blog.filippo.io/shrink-your-go-binaries-with-this-one-weird-trick/)
+        # it strips the DWARF tables needed for debuggers, not the annotations
+        # needed for stack traces, so our panics are still readable!
+        gc_linkopts = ["-w"],
         **kwargs,
     )

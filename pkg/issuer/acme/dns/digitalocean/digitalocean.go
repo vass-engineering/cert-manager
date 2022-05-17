@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,8 +25,9 @@ import (
 	"strings"
 
 	"github.com/digitalocean/godo"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/util"
 	"golang.org/x/oauth2"
+
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/util"
 )
 
 // DNSProvider is an implementation of the acme.ChallengeProvider interface

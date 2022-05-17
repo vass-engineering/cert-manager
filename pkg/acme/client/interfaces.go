@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,23 +19,28 @@ package client
 import (
 	"context"
 
-	acmeutil "github.com/jetstack/cert-manager/pkg/acme/util"
+	acmeutil "github.com/cert-manager/cert-manager/pkg/acme/util"
 
 	"golang.org/x/crypto/acme"
 )
 
+// Interface is an Automatic Certificate Management Environment (ACME) client
+// implementing an Order-based flow.
+//
+// For more information see https://pkg.go.dev/golang.org/x/crypto/acme#Client
+// and RFC 8555 (https://tools.ietf.org/html/rfc8555).
 type Interface interface {
 	AuthorizeOrder(ctx context.Context, id []acme.AuthzID, opt ...acme.OrderOption) (*acme.Order, error)
 	GetOrder(ctx context.Context, url string) (*acme.Order, error)
 	FetchCert(ctx context.Context, url string, bundle bool) ([][]byte, error)
-	FetchCertAlternatives(ctx context.Context, url string, bundle bool) ([][][]byte, error)
+	ListCertAlternates(ctx context.Context, url string) ([]string, error)
 	WaitOrder(ctx context.Context, url string) (*acme.Order, error)
 	CreateOrderCert(ctx context.Context, finalizeURL string, csr []byte, bundle bool) (der [][]byte, certURL string, err error)
 	Accept(ctx context.Context, chal *acme.Challenge) (*acme.Challenge, error)
 	GetChallenge(ctx context.Context, url string) (*acme.Challenge, error)
 	GetAuthorization(ctx context.Context, url string) (*acme.Authorization, error)
 	WaitAuthorization(ctx context.Context, url string) (*acme.Authorization, error)
-	Register(ctx context.Context, a *acme.Account, prompt func(tosURL string) bool) (*acme.Account, error)
+	Register(ctx context.Context, acct *acme.Account, prompt func(tosURL string) bool) (*acme.Account, error)
 	GetReg(ctx context.Context, url string) (*acme.Account, error)
 	HTTP01ChallengeResponse(token string) (string, error)
 	DNS01ChallengeRecord(token string) (string, error)

@@ -6,14 +6,14 @@ go_library(
         "client.go",
         "registry.go",
     ],
-    importpath = "github.com/jetstack/cert-manager/pkg/acme/accounts",
+    importpath = "github.com/cert-manager/cert-manager/pkg/acme/accounts",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/acme/client:go_default_library",
+        "//pkg/acme/client/middleware:go_default_library",
         "//pkg/acme/util:go_default_library",
         "//pkg/apis/acme/v1:go_default_library",
         "//pkg/metrics:go_default_library",
-        "//pkg/util:go_default_library",
         "@org_golang_x_crypto//acme:go_default_library",
     ],
 )

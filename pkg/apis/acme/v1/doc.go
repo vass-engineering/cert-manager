@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,8 +16,5 @@ limitations under the License.
 
 // Package v1 is the v1 version of the API.
 // +k8s:deepcopy-gen=package,register
-// +k8s:conversion-gen=github.com/jetstack/cert-manager/pkg/apis/acme
-// +k8s:openapi-gen=true
-// +k8s:defaulter-gen=TypeMeta
 // +groupName=acme.cert-manager.io
 package v1

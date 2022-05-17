@@ -1,4 +1,4 @@
-# Copyright 2019 The Jetstack cert-manager contributors.
+# Copyright 2020 The cert-manager Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,30 +27,55 @@ def install():
         vcs = "git",
         importpath = "github.com/letsencrypt/pebble",
         build_external = "vendored",
+        build_naming_convention = "go_default_library",
         # Expose the generated go_default_library as 'public' visibility
         patch_cmds = ["sed -i -e 's/private/public/g' 'cmd/pebble/BUILD.bazel'"],
     )
 
-
     ## Fetch nginx-ingress for use during e2e tests
     ## You can change the version of nginx-ingress used for tests by changing the
-    ## 'tag' field in this rule
+    ## 'tag' and 'digest' fields in these rules.
+    ## The digest here is the digest of a platform-specific image, so it will not
+    ## match the manifest list digest in ingress-nginx release notes- you will
+    ## have to find the value by other means.
     container_pull(
-        name = "io_kubernetes_ingress-nginx",
-        registry = "quay.io",
-        repository = "kubernetes-ingress-controller/nginx-ingress-controller",
-        tag = "0.33.0",
-        # For some reason, the suggested sha256 returns an error when fetched from
-        # quay.io by digest.
-        # digest = "sha256:f7f08fdbbeddaf3179829c662da360a3feac1ecf8c4b1305949fffd8c8f59879",
+        name = "io_kubernetes_ingress-nginx_old",
+        registry = "k8s.gcr.io",
+        repository = "ingress-nginx/controller",
+        tag = "v0.49.3",
+        digest = "sha256:c47ed90d1685cb6e3b556353d7afb2aced2be7095066edfc90dd81f3e9014747"
+    )
+    container_pull(
+        name = "io_kubernetes_ingress-nginx_new",
+        registry = "k8s.gcr.io",
+        repository = "ingress-nginx/controller",
+        tag = "v1.1.0",
+        digest = "sha256:7464dc90abfaa084204176bcc0728f182b0611849395787143f6854dc6c38c85"
     )
 
     container_pull(
-        name = "io_gcr_k8s_defaultbackend",
-        registry = "k8s.gcr.io",
-        repository = "defaultbackend-amd64",
-        tag = "1.5",
-        digest = "sha256:4dc5e07c8ca4e23bddb3153737d7b8c556e5fb2f29c4558b7cd6e6df99c512c7",
+        name = "io_kyverno",
+        registry = "ghcr.io",
+        repository = "kyverno/kyverno",
+        tag = "v1.3.6",
+        digest = "sha256:7d7972e7d9ed2a6da27b06ccb1c3c5d3544838d6cedb67a050ba7d655461ef52",
+    )
+
+    container_pull(
+        name = "io_kyverno_pre",
+        registry = "ghcr.io",
+        repository = "kyverno/kyvernopre",
+        tag = "v1.3.6",
+        digest = "sha256:94fc7f204917a86dcdbc18977e843701854aa9f84c215adce36c26de2adf13df",
+    )
+
+    ## Fetch traefik for use during e2e tests.
+    container_pull(
+        name = "io_traefik_traefik",
+        registry = "docker.io",
+        repository = "traefik",
+        tag = "2.4.9",
+        digest = "sha256:bfba2ddb60cea5ebe8bea579a4a18be0bf9cac323783216f83ca268ce0004252",
     )
 
     ## Fetch vault for use during e2e tests
@@ -61,7 +86,7 @@ def install():
         registry = "index.docker.io",
         repository = "library/vault",
         tag = "1.2.3",
-        digest = "sha256:b1c86c9e173f15bb4a926e4144a63f7779531c30554ac7aee9b2a408b22b2c01"
+        digest = "sha256:b1c86c9e173f15bb4a926e4144a63f7779531c30554ac7aee9b2a408b22b2c01",
     )
 
     ## Fetch bind for use during e2e tests
@@ -70,5 +95,14 @@ def install():
         registry = "index.docker.io",
         repository = "sameersbn/bind",
         tag = "9.11.3-20190706",
-        digest = "sha256:b8e84f9a9fe0c05c3a963606c3d0170622be9c5e8800431ffcaadb0c79a3ff75"
+        digest = "sha256:b8e84f9a9fe0c05c3a963606c3d0170622be9c5e8800431ffcaadb0c79a3ff75",
+    )
+
+    ## Fetch sample-external-issuer for use during e2e tests
+    container_pull(
+        name = "io_ghcr_wallrj_sample-external-issuer_controller",
+        registry = "ghcr.io",
+        repository = "wallrj/sample-external-issuer/controller",
+        tag = "v0.0.0-30-gf333b9e",
+        digest = "sha256:609a12fca03554a186e516ef065b4152f02596fba697e3cc45f3593654c87a86",
     )

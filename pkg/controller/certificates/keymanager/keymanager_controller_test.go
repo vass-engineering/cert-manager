@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,11 +30,11 @@ import (
 	coretesting "k8s.io/client-go/testing"
 	"k8s.io/utils/pointer"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
 func mustGenerateRSA(t *testing.T, keySize int) []byte {
@@ -221,7 +221,7 @@ func TestProcessItem(t *testing.T) {
 		},
 		// TODO: in this case we should adapt the controller behaviour to unset the nextPrivateKeySecretName to
 		//  gracefully recover
-		"error if an existing Secret exists and is named as status.nextPrivateKeySecretName but it is not owned by the Certificte": {
+		"error if an existing Secret exists and is named as status.nextPrivateKeySecretName but it is not owned by the Certificate": {
 			certificate: &cmapi.Certificate{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"},
 				Status: cmapi.CertificateStatus{

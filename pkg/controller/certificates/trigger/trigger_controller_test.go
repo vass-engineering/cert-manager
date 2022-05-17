@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,74 +18,65 @@ package trigger
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
+	logtesting "github.com/go-logr/logr/testing"
+	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	coretesting "k8s.io/client-go/testing"
 	fakeclock "k8s.io/utils/clock/testing"
+	"k8s.io/utils/pointer"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificates/trigger/policies"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/internal/controller/certificates/policies"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	testcrypto "github.com/cert-manager/cert-manager/test/unit/crypto"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
-// policyFuncBuilder wraps a policies.Func to allow injecting a testing.T
-type policyFuncBuilder func(t *testing.T) policies.Func
+func Test_controller_ProcessItem(t *testing.T) {
+	fixedNow := metav1.NewTime(time.Now())
+	fixedClock := fakeclock.NewFakeClock(fixedNow.Time)
 
-func TestProcessItem(t *testing.T) {
-	// now time is the current time at the start of the test (the clock is fixed)
-	now := time.Now()
-	metaNow := metav1.NewTime(now)
-	forceTriggeredReason := "ForceTriggered"
-	forceTriggeredMessage := "Re-issuance forced by unit test case"
+	// We don't need to full bundle, just a simple CertificateRequest.
+	createCertificateRequestOrPanic := func(crt *cmapi.Certificate) *cmapi.CertificateRequest {
+		return testcrypto.MustCreateCryptoBundle(t, crt, fixedClock).CertificateRequest
+	}
+
 	tests := map[string]struct {
-		// key that should be passed to ProcessItem.
-		// if not set, the 'namespace/name' of the 'Certificate' field will be used.
-		// if neither is set, the key will be ""
+		// key that should be passed to ProcessItem. If not set, the
+		// 'namespace/name' of the 'Certificate' field will be used. If neither
+		// is set, the key will be "".
 		key string
 
-		// Certificate to be synced for the test.
-		// if not set, the 'key' will be passed to ProcessItem instead.
-		certificate *cmapi.Certificate
+		// Certificate to be synced for the test. If not set, the 'key' will be
+		// passed to ProcessItem instead.
+		existingCertificate *cmapi.Certificate
 
-		// Secret, if set, will exist in the apiserver before the test is run.
-		secret *corev1.Secret
+		mockDataForCertificateReturn    policies.Input
+		mockDataForCertificateReturnErr error
+		wantDataForCertificateCalled    bool
 
-		// Request, if set, will exist in the apiserver before the test is run.
-		requests []*cmapi.CertificateRequest
+		mockShouldReissue       func(t *testing.T) policies.Func
+		wantShouldReissueCalled bool
 
-		// optional chain of policy functions that should be run, wrapped with
-		// the policyFuncBuilder to allow injecting the sub-test's testing.T.
-		policyFuncs []policyFuncBuilder
-
-		// chainShouldEvaluate will cause the test to error if the policy chain
-		// was not attempted to be evaluated
-		chainShouldEvaluate bool
-		// chainShouldTriggerIssuance will cause the policy chain used in the
-		// test to trigger issuance.
-		// This policyFunc will be injected at the end of the policy chain.
-		// If false, the policyFunc that forces an issuance will not be injected
-		// but user-provided policyFuncs will still behave as usual.
-		chainShouldTriggerIssuance bool
-
-		// expectedEvent, if set, is an 'event string' that is expected to be fired.
+		// wantEvent, if set, is an 'event string' that is expected to be fired.
 		// For example, "Normal Issuing Re-issuance forced by unit test case"
 		// where 'Normal' is the event severity, 'Issuing' is the reason and the
 		// remainder is the message.
-		expectedEvent string
+		wantEvent string
 
-		// expectedConditions is the expected set of conditions on the Certificate
+		// wantConditions is the expected set of conditions on the Certificate
 		// resource if an Update is made.
 		// If nil, no update is expected.
 		// If empty, an update to the empty set/nil is expected.
-		expectedConditions []cmapi.CertificateCondition
+		wantConditions []cmapi.CertificateCondition
 
-		// err is the expected error text returned by the controller, if any.
-		err string
+		// wantErr is the expected error text returned by the controller, if any.
+		wantErr string
 	}{
 		"do nothing if an empty 'key' is used": {},
 		"do nothing if an invalid 'key' is used": {
@@ -94,333 +85,597 @@ func TestProcessItem(t *testing.T) {
 		"do nothing if a key references a Certificate that does not exist": {
 			key: "namespace/name",
 		},
-		"do nothing if Certificate already has 'Issuing' condition": {
-			certificate: &cmapi.Certificate{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"},
-				Status: cmapi.CertificateStatus{
-					Conditions: []cmapi.CertificateCondition{
-						{
-							Type:   cmapi.CertificateConditionIssuing,
-							Status: cmmeta.ConditionTrue,
-						},
-					},
-				},
-			},
+		"should do nothing if Certificate already has 'Issuing' condition": {
+			existingCertificate: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateGeneration(42),
+				gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
+					Type:               "Issuing",
+					Status:             "True",
+					ObservedGeneration: 3,
+				}),
+			),
 		},
-		"evaluate policy chain with only the Certificate if no Request or Secret exists": {
-			certificate: &cmapi.Certificate{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"},
+		"should call shouldReissue with the correct cert, secret and current CR": {
+			existingCertificate: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateSecretName("secret-1"),
+				gen.SetCertificateGeneration(42),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(2),
+			),
+			wantDataForCertificateCalled: true,
+			mockDataForCertificateReturn: policies.Input{
+				Secret: gen.Secret("secret-1", gen.SetSecretNamespace("testns")),
+				CurrentRevisionRequest: gen.CertificateRequest("cr-1", gen.SetCertificateRequestNamespace("testns"),
+					gen.AddCertificateRequestOwnerReferences(gen.CertificateRef("cert-1", "cert-1-uid")),
+					gen.SetCertificateRequestAnnotations(map[string]string{"cert-manager.io/certificate-revision": "2"}),
+				),
 			},
-			chainShouldEvaluate: true,
-			policyFuncs: []policyFuncBuilder{
-				// Add a policy function that ensures only the input's 'certificate'
-				// field is set.
-				func(t *testing.T) policies.Func {
-					return func(input policies.Input) (string, string, bool) {
-						if input.Certificate == nil {
-							t.Error("expected policy data 'Certificate' field to be set but it was not")
-						}
-						if input.Secret != nil {
-							t.Errorf("expected policy data 'Secret' field to be unset but it was: %+v", input.Secret)
-						}
-						if input.CurrentRevisionRequest != nil {
-							t.Errorf("expected policy data 'CurrentRevisionRequest' field to be unset but it was: %+v", input.CurrentRevisionRequest)
-						}
-						return "", "", false
+			wantShouldReissueCalled: true,
+			mockShouldReissue: func(t *testing.T) policies.Func {
+				return func(gotInput policies.Input) (string, string, bool) {
+					expectInput := policies.Input{
+						Certificate: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+							gen.SetCertificateSecretName("secret-1"),
+							gen.SetCertificateGeneration(42),
+							gen.SetCertificateUID("cert-1-uid"),
+							gen.SetCertificateRevision(2),
+						),
+						CurrentRevisionRequest: gen.CertificateRequest("cr-1", gen.SetCertificateRequestNamespace("testns"),
+							gen.AddCertificateRequestOwnerReferences(gen.CertificateRef("cert-1", "cert-1-uid")),
+							gen.SetCertificateRequestAnnotations(map[string]string{"cert-manager.io/certificate-revision": "2"}),
+						),
+						Secret: gen.Secret("secret-1", gen.SetSecretNamespace("testns")),
 					}
-				},
+					assert.Equal(t, expectInput, gotInput)
+					return "", "", false
+				}
 			},
 		},
-		"evaluate policy chain with the Certificate and Secret if no Request exists": {
-			certificate: &cmapi.Certificate{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"},
-				Spec: cmapi.CertificateSpec{
-					SecretName: "test-secret",
-				},
-			},
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test-secret"},
-			},
-			chainShouldEvaluate: true,
-			policyFuncs: []policyFuncBuilder{
-				// Add a policy function that ensures only the input's 'certificate'
-				// field is set.
-				func(t *testing.T) policies.Func {
-					return func(input policies.Input) (string, string, bool) {
-						if input.Certificate == nil {
-							t.Error("expected policy data 'Certificate' field to be set but it was not")
-						}
-						if input.Secret == nil {
-							t.Errorf("expected policy data 'Secret' field to be set but it was not")
-						}
-						if input.CurrentRevisionRequest != nil {
-							t.Errorf("expected policy data 'CurrentRevisionRequest' field to be unset but it was: %+v", input.CurrentRevisionRequest)
-						}
-						return "", "", false
-					}
-				},
-			},
+		"should log error when dataForCertificate errors": {
+			existingCertificate:             gen.Certificate("cert-1", gen.SetCertificateNamespace("testns")),
+			wantDataForCertificateCalled:    true,
+			mockDataForCertificateReturnErr: fmt.Errorf("dataForCertificate failed"),
+			wantErr:                         "dataForCertificate failed",
 		},
-		"evaluate policy chain with the Certificate, Secret and Request if one exists": {
-			certificate: &cmapi.Certificate{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"},
-				Spec: cmapi.CertificateSpec{
-					SecretName: "test-secret",
-				},
-				Status: cmapi.CertificateStatus{
-					Revision: func(i int) *int { return &i }(3),
-				},
+		"should set Issuing=True if shouldReissue tells us to reissue": {
+			existingCertificate: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateGeneration(42),
+			),
+			wantDataForCertificateCalled: true,
+			mockDataForCertificateReturn: policies.Input{},
+			wantShouldReissueCalled:      true,
+			mockShouldReissue: func(*testing.T) policies.Func {
+				return func(policies.Input) (string, string, bool) {
+					return "ForceTriggered", "Re-issuance forced by unit test case", true
+				}
 			},
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test-secret"},
-			},
-			requests: []*cmapi.CertificateRequest{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "testns",
-						Name:      "test",
-						Annotations: map[string]string{
-							cmapi.CertificateRequestRevisionAnnotationKey: "3",
-						},
-						OwnerReferences: []metav1.OwnerReference{
-							*metav1.NewControllerRef(&cmapi.Certificate{ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"}}, cmapi.SchemeGroupVersion.WithKind("Certificate")),
-						},
-					},
-				},
-			},
-			chainShouldEvaluate: true,
-			policyFuncs: []policyFuncBuilder{
-				// Add a policy function that ensures only the input's 'certificate'
-				// field is set.
-				func(t *testing.T) policies.Func {
-					return func(input policies.Input) (string, string, bool) {
-						if input.Certificate == nil {
-							t.Error("expected policy data 'Certificate' field to be set but it was not")
-						}
-						if input.Secret == nil {
-							t.Errorf("expected policy data 'Secret' field to be set but it was not")
-						}
-						if input.CurrentRevisionRequest == nil {
-							t.Errorf("expected policy data 'CurrentRevisionRequest' field to be set but it was not")
-						}
-						return "", "", false
-					}
-				},
-			},
+			wantEvent: "Normal Issuing Re-issuance forced by unit test case",
+			wantConditions: []cmapi.CertificateCondition{{
+				Type:               "Issuing",
+				Status:             "True",
+				Reason:             "ForceTriggered",
+				Message:            "Re-issuance forced by unit test case",
+				LastTransitionTime: &fixedNow,
+				ObservedGeneration: 42,
+			}},
 		},
-		"error if multiple owned CertificateRequest resources exist and have the same revision": {
-			certificate: &cmapi.Certificate{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"},
-				Spec: cmapi.CertificateSpec{
-					SecretName: "test-secret",
-				},
-				Status: cmapi.CertificateStatus{
-					Revision: func(i int) *int { return &i }(3),
-				},
+		// The combinations of number of failed issuances and last
+		// failed issuance time that do or do not result in re-issuance
+		// are tested in Test_shouldBackoffReissuingOnFailure below
+		"should not set Issuing=True when issuance failed once 59 minutes ago": {
+			existingCertificate: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(fixedNow.Add(-59*time.Minute))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+			),
+			wantDataForCertificateCalled: true,
+			mockDataForCertificateReturn: policies.Input{
+				NextRevisionRequest: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+					gen.SetCertificateUID("cert-1-uid"),
+					gen.SetCertificateRevision(2),
+					gen.SetCertificateDNSNames("example.com"),
+				)),
 			},
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test-secret"},
-			},
-			requests: []*cmapi.CertificateRequest{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "testns",
-						Name:      "test",
-						Annotations: map[string]string{
-							cmapi.CertificateRequestRevisionAnnotationKey: "3",
-						},
-						OwnerReferences: []metav1.OwnerReference{
-							*metav1.NewControllerRef(&cmapi.Certificate{ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"}}, cmapi.SchemeGroupVersion.WithKind("Certificate")),
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "testns",
-						Name:      "test-number-two",
-						Annotations: map[string]string{
-							cmapi.CertificateRequestRevisionAnnotationKey: "3",
-						},
-						OwnerReferences: []metav1.OwnerReference{
-							*metav1.NewControllerRef(&cmapi.Certificate{ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"}}, cmapi.SchemeGroupVersion.WithKind("Certificate")),
-						},
-					},
-				},
-			},
-			chainShouldEvaluate: false,
-			err:                 "multiple CertificateRequest resources exist for the current revision, not triggering new issuance until requests have been cleaned up",
+			wantShouldReissueCalled: false,
 		},
-		"should evaluate policy if no certificaterequest resource exists for the current revision": {
-			certificate: &cmapi.Certificate{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"},
-				Spec: cmapi.CertificateSpec{
-					SecretName: "test-secret",
-				},
-				Status: cmapi.CertificateStatus{
-					Revision: func(i int) *int { return &i }(3),
-				},
+		"should set Issuing=True when issuance failed once 59 minutes ago but cert and next CR are mismatched": {
+			existingCertificate: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateGeneration(42),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example-that-was-updated-by-user.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(fixedNow.Add(-59*time.Minute))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+			),
+			wantDataForCertificateCalled: true,
+			mockDataForCertificateReturn: policies.Input{
+				NextRevisionRequest: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+					gen.SetCertificateUID("cert-1-uid"),
+					gen.SetCertificateRevision(2),
+					gen.SetCertificateDNSNames("example.com"),
+				)),
 			},
-			secret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test-secret"},
+			wantShouldReissueCalled: true,
+			mockShouldReissue: func(*testing.T) policies.Func {
+				return func(policies.Input) (string, string, bool) {
+					return "ForceTriggered", "Re-issuance forced by unit test case", true
+				}
 			},
-			chainShouldEvaluate: true,
+			wantEvent: "Normal Issuing Re-issuance forced by unit test case",
+			wantConditions: []cmapi.CertificateCondition{{
+				Type:               "Issuing",
+				Status:             "True",
+				Reason:             "ForceTriggered",
+				Message:            "Re-issuance forced by unit test case",
+				LastTransitionTime: &fixedNow,
+				ObservedGeneration: 42,
+			}},
 		},
-		"should set the 'Issuing' status condition if the chain indicates an issuance is required": {
-			certificate: &cmapi.Certificate{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"},
+		"should set Issuing=True when issuance failed once 61 minutes ago and shouldReissue returns true": {
+			existingCertificate: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateGeneration(42),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(fixedNow.Add(-61*time.Minute))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+			),
+			wantDataForCertificateCalled: true,
+			mockDataForCertificateReturn: policies.Input{},
+			wantShouldReissueCalled:      true,
+			mockShouldReissue: func(*testing.T) policies.Func {
+				return func(policies.Input) (string, string, bool) {
+					return "ForceTriggered", "Re-issuance forced by unit test case", true
+				}
 			},
-			chainShouldEvaluate:        true,
-			chainShouldTriggerIssuance: true,
-			expectedEvent:              "Normal Issuing Re-issuance forced by unit test case",
-			expectedConditions: []cmapi.CertificateCondition{
-				{
-					Type:               cmapi.CertificateConditionIssuing,
-					Status:             cmmeta.ConditionTrue,
-					Reason:             forceTriggeredReason,
-					Message:            forceTriggeredMessage,
-					LastTransitionTime: &metaNow,
-				},
-			},
-		},
-		"should not set the 'Issuing' status condition if the chain indicates an issuance is required if the last failure time is within the last hour": {
-			certificate: &cmapi.Certificate{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"},
-				Status: cmapi.CertificateStatus{
-					LastFailureTime: func(m metav1.Time) *metav1.Time { return &m }(metav1.NewTime(now.Add(-59 * time.Minute))),
-				},
-			},
-			chainShouldEvaluate:        false,
-			chainShouldTriggerIssuance: false,
-		},
-		"should set the 'Issuing' status condition if the chain indicates an issuance is required if the last failure time is older than the last hour": {
-			certificate: &cmapi.Certificate{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "testns", Name: "test"},
-				Status: cmapi.CertificateStatus{
-					LastFailureTime: func(m metav1.Time) *metav1.Time { return &m }(metav1.NewTime(now.Add(-61 * time.Minute))),
-				},
-			},
-			chainShouldEvaluate:        true,
-			chainShouldTriggerIssuance: true,
-			expectedEvent:              "Normal Issuing Re-issuance forced by unit test case",
-			expectedConditions: []cmapi.CertificateCondition{
-				{
-					Type:               cmapi.CertificateConditionIssuing,
-					Status:             cmmeta.ConditionTrue,
-					Reason:             forceTriggeredReason,
-					Message:            forceTriggeredMessage,
-					LastTransitionTime: &metaNow,
-				},
-			},
+			wantEvent: "Normal Issuing Re-issuance forced by unit test case",
+			wantConditions: []cmapi.CertificateCondition{{
+				Type:               "Issuing",
+				Status:             "True",
+				Reason:             "ForceTriggered",
+				Message:            "Re-issuance forced by unit test case",
+				LastTransitionTime: &fixedNow,
+				ObservedGeneration: 42,
+			}},
 		},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			// Create and initialise a new unit test builder
 			builder := &testpkg.Builder{
 				T:     t,
-				Clock: fakeclock.NewFakeClock(now),
+				Clock: fixedClock,
 			}
-			if test.certificate != nil {
-				builder.CertManagerObjects = append(builder.CertManagerObjects, test.certificate)
-			}
-			if test.secret != nil {
-				builder.KubeObjects = append(builder.KubeObjects, test.secret)
-			}
-			for _, req := range test.requests {
-				builder.CertManagerObjects = append(builder.CertManagerObjects, req)
+			if test.existingCertificate != nil {
+				builder.CertManagerObjects = append(builder.CertManagerObjects, test.existingCertificate)
 			}
 			builder.Init()
 
-			// Register informers used by the controller using the registration wrapper
 			w := &controllerWrapper{}
 			_, _, err := w.Register(builder.Context)
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Fake out the default policy chain
-			w.policyChain = []policies.Func{}
-			// Record whether the policy chain was evaluated
-			evaluated := false
-			w.policyChain = append(w.policyChain, func(_ policies.Input) (string, string, bool) {
-				evaluated = true
-				return "", "", false
-			})
-			// Add any test-specific policies to the chain
-			w.policyChain = append(w.policyChain, buildTestPolicyChain(t, test.policyFuncs...)...)
-			// If the chain should trigger an issuance, inject an 'always reissue'
-			// policyFunc at the end of the chain
-			if test.chainShouldTriggerIssuance {
-				w.policyChain = append(w.policyChain, func(_ policies.Input) (string, string, bool) {
-					return forceTriggeredReason, forceTriggeredMessage, true
-				})
+
+			gotShouldReissueCalled := false
+			w.shouldReissue = func(i policies.Input) (string, string, bool) {
+				gotShouldReissueCalled = true
+				if test.mockShouldReissue == nil {
+					t.Fatal("no mock set for shouldReissue, but shouldReissue has been called")
+					return "", "", false
+				}
+				return test.mockShouldReissue(t)(i)
 			}
-			if test.expectedConditions != nil {
-				if test.certificate == nil {
+
+			// TODO(mael): we should really remove the Certificate field from
+			// DataForCertificate since the input certificate is always expected
+			// to be the same as the output certiticate.
+			test.mockDataForCertificateReturn.Certificate = test.existingCertificate
+
+			gotDataForCertificateCalled := false
+			w.dataForCertificate = func(context.Context, *cmapi.Certificate) (policies.Input, error) {
+				gotDataForCertificateCalled = true
+				return test.mockDataForCertificateReturn, test.mockDataForCertificateReturnErr
+			}
+
+			if test.wantConditions != nil {
+				if test.existingCertificate == nil {
 					t.Fatal("cannot expect an Update operation if test.certificate is nil")
 				}
-				expectedCert := test.certificate.DeepCopy()
-				expectedCert.Status.Conditions = test.expectedConditions
+				expectedCert := test.existingCertificate.DeepCopy()
+				expectedCert.Status.Conditions = test.wantConditions
 				builder.ExpectedActions = append(builder.ExpectedActions,
 					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
 						cmapi.SchemeGroupVersion.WithResource("certificates"),
 						"status",
-						test.certificate.Namespace,
+						test.existingCertificate.Namespace,
 						expectedCert,
 					)),
 				)
 			}
-			if test.expectedEvent != "" {
-				builder.ExpectedEvents = []string{test.expectedEvent}
+			if test.wantEvent != "" {
+				builder.ExpectedEvents = []string{test.wantEvent}
 			}
-			// Start the informers and begin processing updates
+
 			builder.Start()
 			defer builder.Stop()
 
 			key := test.key
-			if key == "" && test.certificate != nil {
-				key, err = controllerpkg.KeyFunc(test.certificate)
+			if key == "" && test.existingCertificate != nil {
+				key, err = controllerpkg.KeyFunc(test.existingCertificate)
 				if err != nil {
 					t.Fatal(err)
 				}
 			}
 
-			// Call ProcessItem
-			err = w.controller.ProcessItem(context.Background(), key)
+			gotErr := w.controller.ProcessItem(context.Background(), key)
 			switch {
-			case err != nil:
-				if test.err != err.Error() {
-					t.Errorf("error text did not match, got=%s, exp=%s", err.Error(), test.err)
+			case gotErr != nil:
+				if test.wantErr != gotErr.Error() {
+					t.Errorf("error text did not match, got=%s, exp=%s", gotErr.Error(), test.wantErr)
 				}
 			default:
-				if test.err != "" {
-					t.Errorf("got no error but expected: %s", test.err)
-				}
-			}
-			if evaluated != test.chainShouldEvaluate {
-				if test.chainShouldEvaluate {
-					t.Error("expected policy chain to be evaluated but it was not")
-				} else {
-					t.Error("expected policy chain to NOT be evaluated but it was")
+				if test.wantErr != "" {
+					t.Errorf("got no error but expected: %s", test.wantErr)
 				}
 			}
 
-			if err := builder.AllEventsCalled(); err != nil {
-				builder.T.Error(err)
-			}
-			if err := builder.AllActionsExecuted(); err != nil {
-				builder.T.Error(err)
-			}
-			if err := builder.AllReactorsCalled(); err != nil {
-				builder.T.Error(err)
-			}
+			assert.Equal(t, test.wantDataForCertificateCalled, gotDataForCertificateCalled, "dataForCertificate func call")
+			assert.Equal(t, test.wantShouldReissueCalled, gotShouldReissueCalled, "shouldReissue func call")
+
+			builder.CheckAndFinish()
 		})
 	}
 }
 
-func buildTestPolicyChain(t *testing.T, funcs ...policyFuncBuilder) policies.Chain {
-	c := policies.Chain{}
-	for _, f := range funcs {
-		c = append(c, f(t))
+func Test_shouldBackoffReissuingOnFailure(t *testing.T) {
+	clock := fakeclock.NewFakeClock(time.Date(2020, 11, 20, 16, 05, 00, 0000, time.Local))
+
+	// We don't need to full bundle, just a simple CertificateRequest.
+	createCertificateRequestOrPanic := func(crt *cmapi.Certificate) *cmapi.CertificateRequest {
+		return testcrypto.MustCreateCryptoBundle(t, crt, clock).CertificateRequest
 	}
-	return c
+
+	tests := map[string]struct {
+		givenCert   *cmapi.Certificate
+		givenNextCR *cmapi.CertificateRequest
+		wantBackoff bool
+		wantDelay   time.Duration
+	}{
+		"no need to backoff from reissuing when the input request is nil": {
+			givenCert:   gen.Certificate("test", gen.SetCertificateNamespace("testns")),
+			wantBackoff: false,
+		},
+		"should not back off from reissuing when cert is not failing": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				// LastFailureTime is not set here.
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateRevision(1),
+			)),
+			wantBackoff: false,
+		},
+		"should back off from reissuing for 1 minute if there was 1 failed issuance 59 minutes ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-59*time.Minute))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: true,
+			wantDelay:   1 * time.Minute,
+		},
+		"should back off from reissuing for 1 hour if there was 1 failed issuance 0 minutes ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: true,
+			wantDelay:   1 * time.Hour,
+		},
+		"should not back off from reissuing if there was 1 failed issuance 61 minutes ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-61*time.Minute))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: false,
+		},
+		"should back off from reissuing for 2 hours if there were 2 failed issuances, last one 0 minutes ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(2)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: true,
+			wantDelay:   2 * time.Hour,
+		},
+		"should not back off from reissuing if there were 2 failed issuances, last one 2h1min ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-121*time.Minute))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(2)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: false,
+		},
+		"should back off from reissuing for 4 hours if there were 3 failed issuances, last one 0 minutes ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(3)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: true,
+			wantDelay:   4 * time.Hour,
+		},
+		"should not back off from reissuing if there were 3 failed issuances, last one 4h5min ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-245*time.Minute))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(3)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: false,
+		},
+		"should back off from reissuing for 8 hours if there were 4 failed issuances, last one 0 minutes ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(4)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: true,
+			wantDelay:   8 * time.Hour,
+		},
+		"should not back off from reissuing if there were 4 failed issuances, last one 10h ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-10*time.Hour))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(4)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: false,
+		},
+		"should back off from reissuing for 16 hours if there were 5 failed issuances, last one 0 minutes ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(5)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: true,
+			wantDelay:   16 * time.Hour,
+		},
+		"should not back off from reissuing if there were 5 failed issuances, last one 17h1min ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-1021*time.Minute))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(5)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: false,
+		},
+		"should back off from reissuing for 32 hours if there were  6 failed issuances, last one 0 minutes ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(6)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: true,
+			wantDelay:   32 * time.Hour,
+		},
+		"should not back off from reissuing if there were  6 failed issuances, last one 32h ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-32*time.Hour))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(6)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: false,
+		},
+		"should back off from reissuing for 32 hours if there were 100 failed issuances, last one 0 minutes ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(100)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: true,
+			wantDelay:   32 * time.Hour,
+		},
+		"should not back off from reissuing if there were 100 failed issuances, last one 32h ago": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-32*time.Hour))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(100)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: false,
+		},
+		// This scenario will happen if an issuance failed for a version of cert-manager that does not implement exponential backoff
+		"should back off from reissuing for 1 hour if there was a failed issuance, 0 minutes ago and issuance attempts is not set": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: true,
+			wantDelay:   1 * time.Hour,
+		},
+		// This scenario will happen if an issuance failed for a version of cert-manager that does not implement exponential backoff
+		"should back off from reissuing for 1 minute if there was a failed issuance 59 minutes ago and issuance attempts is not set": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-59*time.Minute))),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: true,
+			wantDelay:   1 * time.Minute,
+		},
+		// This scenario will happen if an issuance failed for a version of cert-manager that does not implement exponential backoff
+		"should not back off from reissuing if there was a failed issuance 1 hour ago and issuance attempts is not set": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-1*time.Hour))),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: false,
+		},
+		"should not back off from reissuing when the failure happened 0 minutes ago and cert and next CR are mismatched": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example-was-changed-by-user.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: false,
+		},
+		"should not back off from reissuing when the failure happened 1 minutes ago and cert and next CR are mismatched": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example-was-updated-by-user.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now().Add(-1*time.Minute))),
+				gen.SetCertificateIssuanceAttempts(pointer.Int(1)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff: false,
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			gotBackoff, gotDelay := shouldBackoffReissuingOnFailure(logtesting.NewTestLogger(t), clock, test.givenCert, test.givenNextCR)
+			assert.Equal(t, test.wantBackoff, gotBackoff)
+			assert.Equal(t, test.wantDelay, gotDelay)
+		})
+
+	}
 }

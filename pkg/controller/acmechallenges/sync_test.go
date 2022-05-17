@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,21 +18,23 @@ package acmechallenges
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
 	acmeapi "golang.org/x/crypto/acme"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	coretesting "k8s.io/client-go/testing"
 
-	accountstest "github.com/jetstack/cert-manager/pkg/acme/accounts/test"
-	acmecl "github.com/jetstack/cert-manager/pkg/acme/client"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	testpkg "github.com/jetstack/cert-manager/pkg/controller/test"
-	"github.com/jetstack/cert-manager/pkg/issuer"
-	"github.com/jetstack/cert-manager/test/unit/gen"
+	accountstest "github.com/cert-manager/cert-manager/pkg/acme/accounts/test"
+	acmecl "github.com/cert-manager/cert-manager/pkg/acme/client"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	testpkg "github.com/cert-manager/cert-manager/pkg/controller/test"
+	"github.com/cert-manager/cert-manager/pkg/issuer"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
 
 // Present the challenge value with the given solver.
@@ -83,9 +85,169 @@ func TestSyncHappyPath(t *testing.T) {
 		gen.SetChallengeIssuer(cmmeta.ObjectReference{
 			Name: "testissuer",
 		}),
+		gen.SetChallengeFinalizers([]string{cmacme.ACMEFinalizer}),
 	)
+	deletedChallenge := gen.ChallengeFrom(baseChallenge,
+		gen.SetChallengeDeletionTimestamp(metav1.Now()))
 
+	simulatedCleanupError := errors.New("simulated-cleanup-error")
 	tests := map[string]testT{
+		"cleanup if the challenge is deleted and remove the finalizer": {
+			challenge: gen.ChallengeFrom(deletedChallenge,
+				gen.SetChallengeProcessing(true),
+				gen.SetChallengeURL("testurl"),
+				gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
+			),
+			httpSolver: &fakeSolver{
+				fakeCleanUp: func(ctx context.Context, issuer v1.GenericIssuer, ch *cmacme.Challenge) error {
+					return nil
+				},
+			},
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{
+					gen.ChallengeFrom(deletedChallenge,
+						gen.SetChallengeProcessing(true),
+						gen.SetChallengeURL("testurl"),
+						gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
+					),
+					testIssuerHTTP01Enabled,
+				},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateAction(cmacme.SchemeGroupVersion.WithResource("challenges"),
+						gen.DefaultTestNamespace,
+						gen.ChallengeFrom(deletedChallenge,
+							gen.SetChallengeProcessing(true),
+							gen.SetChallengeURL("testurl"),
+							gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
+							gen.SetChallengeFinalizers([]string{}),
+						))),
+				},
+			},
+		},
+		"if the challenge is deleted and the cleanup fails, set the reason (and remove the finalizer, which is a bug)": {
+			challenge: gen.ChallengeFrom(deletedChallenge,
+				gen.SetChallengeProcessing(true),
+				gen.SetChallengeURL("testurl"),
+				gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
+			),
+			httpSolver: &fakeSolver{
+				fakeCleanUp: func(ctx context.Context, issuer v1.GenericIssuer, ch *cmacme.Challenge) error {
+					return simulatedCleanupError
+				},
+			},
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{
+					gen.ChallengeFrom(deletedChallenge,
+						gen.SetChallengeProcessing(true),
+						gen.SetChallengeURL("testurl"),
+						gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
+					),
+					testIssuerHTTP01Enabled,
+				},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateAction(cmacme.SchemeGroupVersion.WithResource("challenges"),
+						gen.DefaultTestNamespace,
+						gen.ChallengeFrom(deletedChallenge,
+							gen.SetChallengeProcessing(true),
+							gen.SetChallengeURL("testurl"),
+							gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
+							gen.SetChallengeFinalizers([]string{}),
+							gen.SetChallengeReason(simulatedCleanupError.Error()),
+						))),
+					testpkg.NewAction(
+						coretesting.NewUpdateSubresourceAction(cmacme.SchemeGroupVersion.WithResource("challenges"),
+							"status",
+							gen.DefaultTestNamespace,
+							gen.ChallengeFrom(deletedChallenge,
+								gen.SetChallengeProcessing(true),
+								gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
+								gen.SetChallengeURL("testurl"),
+								gen.SetChallengeFinalizers([]string{}),
+								gen.SetChallengeReason(simulatedCleanupError.Error()),
+							))),
+				},
+				ExpectedEvents: []string{
+					fmt.Sprintf("Warning CleanUpError Error cleaning up challenge: %s", simulatedCleanupError),
+				},
+			},
+		},
+		"if finalizer is missing, add it": {
+			challenge: gen.ChallengeFrom(baseChallenge,
+				gen.SetChallengeProcessing(true),
+				gen.SetChallengeFinalizers(nil),
+			),
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{gen.ChallengeFrom(baseChallenge,
+					gen.SetChallengeProcessing(true),
+					gen.SetChallengeFinalizers(nil),
+				), testIssuerHTTP01Enabled},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(
+						coretesting.NewUpdateAction(
+							cmacme.SchemeGroupVersion.WithResource("challenges"),
+							gen.DefaultTestNamespace,
+							gen.ChallengeFrom(baseChallenge,
+								gen.SetChallengeProcessing(true),
+								gen.SetChallengeFinalizers([]string{cmacme.ACMEFinalizer})))),
+				},
+			},
+			expectErr: false,
+		},
+		"if GetAuthorization doesn't return challenge, error": {
+			challenge: gen.ChallengeFrom(baseChallenge,
+				gen.SetChallengeProcessing(true),
+				gen.SetChallengeURL("testurl"),
+			),
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{gen.ChallengeFrom(baseChallenge,
+					gen.SetChallengeProcessing(true),
+					gen.SetChallengeURL("testurl"),
+				), testIssuerHTTP01Enabled},
+				ExpectedActions: []testpkg.Action{},
+			},
+			expectErr: true,
+			acmeClient: &acmecl.FakeACME{
+				FakeGetAuthorization: func(ctx context.Context, url string) (*acmeapi.Authorization, error) {
+					return &acmeapi.Authorization{
+						Challenges: []*acmeapi.Challenge{
+							{URI: "foo", Status: acmeapi.StatusPending},
+						},
+					}, nil
+				},
+			},
+		},
+		"if GetAuthorization returns challenge ready, update ready": {
+			challenge: gen.ChallengeFrom(baseChallenge,
+				gen.SetChallengeProcessing(true),
+				gen.SetChallengeURL("testurl"),
+			),
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{gen.ChallengeFrom(baseChallenge,
+					gen.SetChallengeProcessing(true),
+					gen.SetChallengeURL("testurl"),
+				), testIssuerHTTP01Enabled},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(
+						coretesting.NewUpdateSubresourceAction(cmacme.SchemeGroupVersion.WithResource("challenges"),
+							"status",
+							gen.DefaultTestNamespace,
+							gen.ChallengeFrom(baseChallenge,
+								gen.SetChallengeProcessing(true),
+								gen.SetChallengeURL("testurl"),
+								gen.SetChallengeState(cmacme.Ready),
+							))),
+				},
+			},
+			acmeClient: &acmecl.FakeACME{
+				FakeGetAuthorization: func(ctx context.Context, url string) (*acmeapi.Authorization, error) {
+					return &acmeapi.Authorization{
+						Challenges: []*acmeapi.Challenge{
+							{URI: "testurl", Status: acmeapi.StatusReady},
+						},
+					}, nil
+				},
+			},
+		},
 		"update status if state is unknown": {
 			challenge: gen.ChallengeFrom(baseChallenge,
 				gen.SetChallengeProcessing(true),
@@ -109,8 +271,12 @@ func TestSyncHappyPath(t *testing.T) {
 				},
 			},
 			acmeClient: &acmecl.FakeACME{
-				FakeGetChallenge: func(ctx context.Context, url string) (*acmeapi.Challenge, error) {
-					return &acmeapi.Challenge{Status: acmeapi.StatusPending}, nil
+				FakeGetAuthorization: func(ctx context.Context, url string) (*acmeapi.Authorization, error) {
+					return &acmeapi.Authorization{
+						Challenges: []*acmeapi.Challenge{
+							{URI: "testurl", Status: acmeapi.StatusPending},
+						},
+					}, nil
 				},
 			},
 		},

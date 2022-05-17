@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,27 +18,30 @@ package acmechallenges
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"reflect"
 
 	acmeapi "golang.org/x/crypto/acme"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 
-	"github.com/jetstack/cert-manager/pkg/acme"
-	acmecl "github.com/jetstack/cert-manager/pkg/acme/client"
-	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/feature"
-	dnsutil "github.com/jetstack/cert-manager/pkg/issuer/acme/dns/util"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
-	utilfeature "github.com/jetstack/cert-manager/pkg/util/feature"
+	"github.com/cert-manager/cert-manager/internal/controller/feature"
+	"github.com/cert-manager/cert-manager/pkg/acme"
+	acmecl "github.com/cert-manager/cert-manager/pkg/acme/client"
+	cmacme "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	dnsutil "github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/util"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
+	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 )
 
 const (
 	reasonDomainVerified = "DomainVerified"
+	reasonCleanUpError   = "CleanUpError"
+	reasonPresentError   = "PresentError"
+	reasonPresented      = "Presented"
+	reasonFailed         = "Failed"
 )
 
 // solver solves ACME challenges by presenting the given token and key in an
@@ -56,31 +59,36 @@ type solver interface {
 
 // Sync will process this ACME Challenge.
 // It is the core control function for ACME challenges.
-func (c *controller) Sync(ctx context.Context, ch *cmacme.Challenge) (err error) {
-	log := logf.FromContext(ctx).WithValues("dnsName", ch.Spec.DNSName, "type", ch.Spec.Type)
+func (c *controller) Sync(ctx context.Context, chOriginal *cmacme.Challenge) (err error) {
+	log := logf.FromContext(ctx).WithValues("dnsName", chOriginal.Spec.DNSName, "type", chOriginal.Spec.Type)
 	ctx = logf.NewContext(ctx, log)
-
-	oldChal := ch
-	ch = ch.DeepCopy()
-
-	if ch.DeletionTimestamp != nil {
-		return c.handleFinalizer(ctx, ch)
-	}
+	ch := chOriginal.DeepCopy()
 
 	defer func() {
-		// TODO: replace with more efficient comparison
-		if reflect.DeepEqual(oldChal.Status, ch.Status) && len(oldChal.Finalizers) == len(ch.Finalizers) {
-			return
-		}
-		_, updateErr := c.cmClient.AcmeV1().Challenges(ch.Namespace).UpdateStatus(context.TODO(), ch, metav1.UpdateOptions{})
-		if updateErr != nil {
-			err = utilerrors.NewAggregate([]error{err, updateErr})
+		if updateError := c.updateObject(ctx, chOriginal, ch); updateError != nil {
+			if errors.Is(updateError, argumentError) {
+				log.Error(updateError, "If this error occurs there is a bug in cert-manager. Please report it. Not retrying.")
+				return
+			}
+			err = utilerrors.NewAggregate([]error{err, updateError})
 		}
 	}()
 
+	if !ch.DeletionTimestamp.IsZero() {
+		return c.handleFinalizer(ctx, ch)
+	}
+
 	// bail out early on if processing=false, as this challenge has not been
 	// scheduled yet.
-	if ch.Status.Processing == false {
+	if !ch.Status.Processing {
+		return nil
+	}
+
+	// This finalizer ensures that the challenge is not garbage collected before
+	// cert-manager has a chance to clean up resources created for the
+	// challenge.
+	if finalizerRequired(ch) {
+		ch.Finalizers = append(ch.Finalizers, cmacme.ACMEFinalizer)
 		return nil
 	}
 
@@ -101,7 +109,7 @@ func (c *controller) Sync(ctx context.Context, ch *cmacme.Challenge) (err error)
 
 			err = solver.CleanUp(ctx, genericIssuer, ch)
 			if err != nil {
-				c.recorder.Eventf(ch, corev1.EventTypeWarning, "CleanUpError", "Error cleaning up challenge: %v", err)
+				c.recorder.Eventf(ch, corev1.EventTypeWarning, reasonCleanUpError, "Error cleaning up challenge: %v", err)
 				ch.Status.Reason = err.Error()
 				log.Error(err, "error cleaning up challenge")
 				return err
@@ -168,13 +176,13 @@ func (c *controller) Sync(ctx context.Context, ch *cmacme.Challenge) (err error)
 	if !ch.Status.Presented {
 		err := solver.Present(ctx, genericIssuer, ch)
 		if err != nil {
-			c.recorder.Eventf(ch, corev1.EventTypeWarning, "PresentError", "Error presenting challenge: %v", err)
+			c.recorder.Eventf(ch, corev1.EventTypeWarning, reasonPresentError, "Error presenting challenge: %v", err)
 			ch.Status.Reason = err.Error()
 			return err
 		}
 
 		ch.Status.Presented = true
-		c.recorder.Eventf(ch, corev1.EventTypeNormal, "Presented", "Presented challenge using %s challenge mechanism", ch.Spec.Type)
+		c.recorder.Eventf(ch, corev1.EventTypeNormal, reasonPresented, "Presented challenge using %s challenge mechanism", ch.Spec.Type)
 	}
 
 	err = solver.Check(ctx, genericIssuer, ch)
@@ -248,19 +256,8 @@ func (c *controller) handleFinalizer(ctx context.Context, ch *cmacme.Challenge) 
 	}
 
 	defer func() {
-		// call UpdateStatus first as we may have updated the challenge.status.reason field
-		ch, updateErr := c.cmClient.AcmeV1().Challenges(ch.Namespace).UpdateStatus(context.TODO(), ch, metav1.UpdateOptions{})
-		if updateErr != nil {
-			err = utilerrors.NewAggregate([]error{err, updateErr})
-			return
-		}
 		// call Update to remove the metadata.finalizers entry
 		ch.Finalizers = ch.Finalizers[1:]
-		_, updateErr = c.cmClient.AcmeV1().Challenges(ch.Namespace).Update(context.TODO(), ch, metav1.UpdateOptions{})
-		if updateErr != nil {
-			err = utilerrors.NewAggregate([]error{err, updateErr})
-			return
-		}
 	}()
 
 	if !ch.Status.Processing {
@@ -280,7 +277,7 @@ func (c *controller) handleFinalizer(ctx context.Context, ch *cmacme.Challenge) 
 
 	err = solver.CleanUp(ctx, genericIssuer, ch)
 	if err != nil {
-		c.recorder.Eventf(ch, corev1.EventTypeWarning, "CleanUpError", "Error cleaning up challenge: %v", err)
+		c.recorder.Eventf(ch, corev1.EventTypeWarning, reasonCleanUpError, "Error cleaning up challenge: %v", err)
 		ch.Status.Reason = err.Error()
 		log.Error(err, "error cleaning up challenge")
 		return nil
@@ -297,9 +294,37 @@ func (c *controller) syncChallengeStatus(ctx context.Context, cl acmecl.Interfac
 		return fmt.Errorf("challenge URL is blank - challenge has not been created yet")
 	}
 
-	acmeChallenge, err := cl.GetChallenge(ctx, ch.Spec.URL)
+	// Here we GetAuthorization and prune out the Challenge we are concerned with
+	// to gather the current state of the Challenge. In older versions of
+	// cert-manager we called the Challenge endpoint directly using a POST-as-GET
+	// request (GetChallenge). This caused issues with some ACME server
+	// implementations whereby they either interpreted this call as an Accept
+	// which would invalidate the Order as Challenge resources were not ready yet
+	// to complete the Challenge, or otherwise bork their state machines.
+	// While the ACME RFC[1] is left ambiguous as to whether this call is indeed
+	// supported, it is the general consensus by the cert-manager team that it
+	// should be. In any case, in an effort to support as many current and future
+	// ACME server implementations as possible, we have decided to use a
+	// POST-as-GET to the Authorization endpoint instead which unequivocally is
+	// part of the RFC explicitly.
+	// This issue was brought to the RFC mailing list[2].
+	// [1] - https://datatracker.ietf.org/doc/html/rfc8555#section-7.5.1
+	// [2] - https://mailarchive.ietf.org/arch/msg/acme/NknXHBXl3aRG0nBmgsFH-SP90A4/
+	acmeAuthorization, err := cl.GetAuthorization(ctx, ch.Spec.AuthorizationURL)
 	if err != nil {
 		return err
+	}
+
+	var acmeChallenge *acmeapi.Challenge
+	for _, challenge := range acmeAuthorization.Challenges {
+		if challenge.URI == ch.Spec.URL {
+			acmeChallenge = challenge
+			break
+		}
+	}
+
+	if acmeChallenge == nil {
+		return errors.New("challenge was not present in authorization")
 	}
 
 	// TODO: should we validate the State returned by the ACME server here?
@@ -376,7 +401,7 @@ func (c *controller) handleAuthorizationError(ch *cmacme.Challenge, err error) e
 	//   if the returned state is 'invalid'
 	ch.Status.State = cmacme.Invalid
 	ch.Status.Reason = fmt.Sprintf("Error accepting authorization: %v", authErr)
-	c.recorder.Eventf(ch, corev1.EventTypeWarning, "Failed", "Accepting challenge authorization failed: %v", authErr)
+	c.recorder.Eventf(ch, corev1.EventTypeWarning, reasonFailed, "Accepting challenge authorization failed: %v", authErr)
 
 	// return nil here, as accepting the challenge did not error, the challenge
 	// simply failed

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,38 +22,42 @@ import (
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	corelisters "k8s.io/client-go/listers/core/v1"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	controllerpkg "github.com/jetstack/cert-manager/pkg/controller"
-	"github.com/jetstack/cert-manager/pkg/controller/certificaterequests"
-	crutil "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/util"
-	vaultinternal "github.com/jetstack/cert-manager/pkg/internal/vault"
-	"github.com/jetstack/cert-manager/pkg/issuer"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	vaultinternal "github.com/cert-manager/cert-manager/internal/vault"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
+	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
+	crutil "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/util"
+	"github.com/cert-manager/cert-manager/pkg/issuer"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 const (
+	// CRControllerName is the name of Vault certificate requests controller.
 	CRControllerName = "certificaterequests-issuer-vault"
 )
 
+// Vault is a Vault-specific implementation of
+// pkg/controller/certificaterequests.Issuer interface.
 type Vault struct {
 	issuerOptions controllerpkg.IssuerOptions
 	secretsLister corelisters.SecretLister
 	reporter      *crutil.Reporter
 
-	vaultClientBuilder vaultinternal.VaultClientBuilder
+	vaultClientBuilder vaultinternal.ClientBuilder
 }
 
 func init() {
 	// create certificate request controller for vault issuer
-	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.Context) (controllerpkg.Interface, error) {
+	controllerpkg.Register(CRControllerName, func(ctx *controllerpkg.ContextFactory) (controllerpkg.Interface, error) {
 		return controllerpkg.NewBuilder(ctx, CRControllerName).
-			For(certificaterequests.New(apiutil.IssuerVault, NewVault(ctx))).
+			For(certificaterequests.New(apiutil.IssuerVault, NewVault)).
 			Complete()
 	})
 }
 
-func NewVault(ctx *controllerpkg.Context) *Vault {
+// NewVault returns a new Vault instance with the given controller context.
+func NewVault(ctx *controllerpkg.Context) certificaterequests.Issuer {
 	return &Vault{
 		issuerOptions:      ctx.IssuerOptions,
 		secretsLister:      ctx.KubeSharedInformerFactory.Core().V1().Secrets().Lister(),
@@ -62,6 +66,8 @@ func NewVault(ctx *controllerpkg.Context) *Vault {
 	}
 }
 
+// Sign will connect to Vault server associated with the provided issuer to sign
+// the X.509 certificate from the Certificate Request.
 func (v *Vault) Sign(ctx context.Context, cr *v1.CertificateRequest, issuerObj v1.GenericIssuer) (*issuer.IssueResponse, error) {
 	log := logf.FromContext(ctx, "sign")
 	log = logf.WithRelatedResource(log, issuerObj)

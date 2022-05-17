@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package certificates
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"fmt"
 	"reflect"
@@ -28,11 +29,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	"github.com/jetstack/cert-manager/pkg/util"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/cert-manager/cert-manager/pkg/util"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
 )
 
+// PrivateKeyMatchesSpec returns an error if the private key bit size
+// doesn't match the provided spec. RSA, Ed25519 and ECDSA are supported.
+// If any error is returned, a list of violations will also be returned.
 func PrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) ([]string, error) {
 	spec = *spec.DeepCopy()
 	if spec.PrivateKey == nil {
@@ -41,6 +45,8 @@ func PrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) ([]
 	switch spec.PrivateKey.Algorithm {
 	case "", cmapi.RSAKeyAlgorithm:
 		return rsaPrivateKeyMatchesSpec(pk, spec)
+	case cmapi.Ed25519KeyAlgorithm:
+		return ed25519PrivateKeyMatchesSpec(pk, spec)
 	case cmapi.ECDSAKeyAlgorithm:
 		return ecdsaPrivateKeyMatchesSpec(pk, spec)
 	default:
@@ -88,6 +94,15 @@ func ecdsaPrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec
 		violations = append(violations, "spec.keySize")
 	}
 	return violations, nil
+}
+
+func ed25519PrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) ([]string, error) {
+	_, ok := pk.(ed25519.PrivateKey)
+	if !ok {
+		return []string{"spec.keyAlgorithm"}, nil
+	}
+
+	return nil, nil
 }
 
 // RequestMatchesSpec compares a CertificateRequest with a CertificateSpec
@@ -262,16 +277,40 @@ func GenerateLocallySignedTemporaryCertificate(crt *cmapi.Certificate, pkData []
 	return b, nil
 }
 
-// RenewBeforeExpiryDuration will return the amount of time before the given
-// NotAfter time that the certificate should be renewed.
-func RenewBeforeExpiryDuration(notBefore, notAfter time.Time, specRenewBefore *metav1.Duration) time.Duration {
-	renewBefore := cmapi.DefaultRenewBefore
-	if specRenewBefore != nil {
-		renewBefore = specRenewBefore.Duration
-	}
+//RenewalTimeFunc is a custom function type for calculating renewal time of a certificate.
+type RenewalTimeFunc func(time.Time, time.Time, *metav1.Duration) *metav1.Time
+
+// RenewalTime calculates renewal time for a certificate. Default renewal time
+// is 2/3 through certificate's lifetime. If user has configured
+// spec.renewBefore, renewal time will be renewBefore period before expiry
+// (unless that is after the expiry).
+func RenewalTime(notBefore, notAfter time.Time, renewBeforeOverride *metav1.Duration) *metav1.Time {
+
+	// 1. Calculate how long before expiry a cert should be renewed
+
 	actualDuration := notAfter.Sub(notBefore)
-	if renewBefore > actualDuration {
-		renewBefore = actualDuration / 3
+
+	renewBefore := actualDuration / 3
+
+	// If spec.renewBefore was set (and is less than duration)
+	// respect that. We don't want to prevent users from renewing
+	// longer lived certs more frequently.
+	if renewBeforeOverride != nil && renewBeforeOverride.Duration < actualDuration {
+		renewBefore = renewBeforeOverride.Duration
 	}
-	return renewBefore
+
+	// 2. Calculate when a cert should be renewed
+
+	// Truncate the renewal time to nearest second. This is important
+	// because the renewal time also gets stored on Certificate's status
+	// where it is truncated to the nearest second. We use the renewal time
+	// from Certificate's status to determine when the Certificate will be
+	// added to the queue to be renewed, but then re-calculate whether it
+	// needs to be renewed _now_ using this function- so returning a
+	// non-truncated value here would potentially cause Certificates to be
+	// re-queued for renewal earlier than the calculated renewal time thus
+	// causing Certificates to not be automatically renewed. See
+	// https://github.com/cert-manager/cert-manager/pull/4399.
+	rt := metav1.NewTime(notAfter.Add(-1 * renewBefore).Truncate(time.Second))
+	return &rt
 }

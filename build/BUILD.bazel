@@ -18,14 +18,44 @@ DOCKERIZED_BINARIES = {
     "webhook": {
         "target": "//cmd/webhook:webhook",
     },
+    "ctl": {
+        "target": "//cmd/ctl:ctl",
+    },
 }
+
+# Allows passing --define image_type custom flag to Bazel command. Used to allow
+# optionally build with the dynamic base image. This would only be used by
+# alternative/experimental cert-manager builds that, for example, need to create
+# dynamically linked binaries due to linking to a C library.
+# Example command to build server images with dynamic base:
+# bazel run --define image_type=dynamic --platforms=@io_bazel_rules_go//go/toolchain:linux_amd64 //build:server-images.
+config_setting(
+    name = "dynamic_image",
+    values = {
+        "define": "image_type=dynamic",
+    },
+)
+
+# The static base will always be used by default, but having this config setting
+# makes it easier to parameterize Bazel commands in the Makefile.
+config_setting(
+    name = "static_image",
+    values = {
+        "define": "image_type=static",
+    },
+)
 
 # When pushing to quay.io, we want to use an arch, since the archless name is now used for a
 # manifest list. Bazel doesn't support manifest lists (yet), so we can't do that either.
 [multi_arch_container(
     name = binary,
     architectures = SERVER_PLATFORMS["linux"],
-    base = "@static_base//image",
+    # Always use the static base unless dynamic explicitly requested.
+    base = select({
+        ":dynamic_image": "@dynamic_base//image",
+        ":static_image": "@static_base//image",
+        "//conditions:default": "@static_base//image",
+    }),
     binary = select(for_platforms(
         for_server = meta["target"],
         only_os = "linux",
@@ -75,6 +105,10 @@ grep ^STABLE_BUILD_SCM_REVISION bazel-out/stable-status.txt \
     stamp = 1,
 )
 
+# This rule will produce tarballs and docker tags for all server images.
+# Building this rule will result in invocation of the multi_arch_container rule
+# because the srcs list contains Bazel labels that correspond to the output of
+# the native.genrule in multi_arch_container definiton.
 release_filegroup(
     name = "server-artifacts",
     srcs = [":%s.tar" % binary for binary in DOCKERIZED_BINARIES.keys()] +
@@ -83,9 +117,16 @@ release_filegroup(
 )
 
 release_filegroup(
-    name = "client-artifacts",
+    name = "client-artifacts-cmctl",
     conditioned_srcs = for_platforms(for_client = [
         "//cmd/ctl:ctl",
+    ]),
+)
+
+release_filegroup(
+    name = "client-artifacts-kubectl-cert_manager",
+    conditioned_srcs = for_platforms(for_client = [
+        "//cmd/ctl:kubectl-cert_manager",
     ]),
 )
 

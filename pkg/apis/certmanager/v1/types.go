@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,15 @@ const (
 	// Annotation key for certificate common name.
 	CommonNameAnnotationKey = "cert-manager.io/common-name"
 
+	// Duration key for certificate duration.
+	DurationAnnotationKey = "cert-manager.io/duration"
+
+	// Annotation key for certificate renewBefore.
+	RenewBeforeAnnotationKey = "cert-manager.io/renew-before"
+
+	// Annotation key for certificate key usages.
+	UsagesAnnotationKey = "cert-manager.io/usages"
+
 	// Annotation key the 'name' of the Issuer resource.
 	IssuerNameAnnotationKey = "cert-manager.io/issuer-name"
 
@@ -48,15 +57,15 @@ const (
 )
 
 const (
-	// issuerNameAnnotation can be used to override the issuer specified on the
-	// created Certificate resource.
+	// IngressIssuerNameAnnotationKey holds the issuerNameAnnotation value which can be
+	// used to override the issuer specified on the created Certificate resource.
 	IngressIssuerNameAnnotationKey = "cert-manager.io/issuer"
-	// clusterIssuerNameAnnotation can be used to override the issuer specified on the
-	// created Certificate resource. The Certificate will reference the
-	// specified *ClusterIssuer* instead of normal issuer.
+	// IngressClusterIssuerNameAnnotationKey holds the clusterIssuerNameAnnotation value which
+	// can be used to override the issuer specified on the created Certificate resource. The Certificate
+	// will reference the specified *ClusterIssuer* instead of normal issuer.
 	IngressClusterIssuerNameAnnotationKey = "cert-manager.io/cluster-issuer"
-	// acmeIssuerHTTP01IngressClassAnnotation can be used to override the http01 ingressClass
-	// if the challenge type is set to http01
+	// IngressACMEIssuerHTTP01IngressClassAnnotationKey holds the acmeIssuerHTTP01IngressClassAnnotation value
+	// which can be used to override the http01 ingressClass if the challenge type is set to http01
 	IngressACMEIssuerHTTP01IngressClassAnnotationKey = "acme.cert-manager.io/http01-ingress-class"
 
 	// IngressClassAnnotationKey picks a specific "class" for the Ingress. The
@@ -101,7 +110,7 @@ const (
 	// as namespace/name.  The certificate is expected to have the is-serving-for annotations.
 	WantInjectAnnotation = "cert-manager.io/inject-ca-from"
 
-	// WantInjectAPIServerCAAnnotation, if set to "true", will make the cainjector
+	// WantInjectAPIServerCAAnnotation will - if set to "true" - make the cainjector
 	// inject the CA certificate for the Kubernetes apiserver into the resource.
 	// It discovers the apiserver's CA by inspecting the service account credentials
 	// mounted into the cainjector pod.
@@ -165,29 +174,29 @@ const (
 type KeyUsage string
 
 const (
-	UsageSigning            KeyUsage = "signing"
-	UsageDigitalSignature   KeyUsage = "digital signature"
-	UsageContentCommittment KeyUsage = "content commitment"
-	UsageKeyEncipherment    KeyUsage = "key encipherment"
-	UsageKeyAgreement       KeyUsage = "key agreement"
-	UsageDataEncipherment   KeyUsage = "data encipherment"
-	UsageCertSign           KeyUsage = "cert sign"
-	UsageCRLSign            KeyUsage = "crl sign"
-	UsageEncipherOnly       KeyUsage = "encipher only"
-	UsageDecipherOnly       KeyUsage = "decipher only"
-	UsageAny                KeyUsage = "any"
-	UsageServerAuth         KeyUsage = "server auth"
-	UsageClientAuth         KeyUsage = "client auth"
-	UsageCodeSigning        KeyUsage = "code signing"
-	UsageEmailProtection    KeyUsage = "email protection"
-	UsageSMIME              KeyUsage = "s/mime"
-	UsageIPsecEndSystem     KeyUsage = "ipsec end system"
-	UsageIPsecTunnel        KeyUsage = "ipsec tunnel"
-	UsageIPsecUser          KeyUsage = "ipsec user"
-	UsageTimestamping       KeyUsage = "timestamping"
-	UsageOCSPSigning        KeyUsage = "ocsp signing"
-	UsageMicrosoftSGC       KeyUsage = "microsoft sgc"
-	UsageNetscapeSGC        KeyUsage = "netscape sgc"
+	UsageSigning           KeyUsage = "signing"
+	UsageDigitalSignature  KeyUsage = "digital signature"
+	UsageContentCommitment KeyUsage = "content commitment"
+	UsageKeyEncipherment   KeyUsage = "key encipherment"
+	UsageKeyAgreement      KeyUsage = "key agreement"
+	UsageDataEncipherment  KeyUsage = "data encipherment"
+	UsageCertSign          KeyUsage = "cert sign"
+	UsageCRLSign           KeyUsage = "crl sign"
+	UsageEncipherOnly      KeyUsage = "encipher only"
+	UsageDecipherOnly      KeyUsage = "decipher only"
+	UsageAny               KeyUsage = "any"
+	UsageServerAuth        KeyUsage = "server auth"
+	UsageClientAuth        KeyUsage = "client auth"
+	UsageCodeSigning       KeyUsage = "code signing"
+	UsageEmailProtection   KeyUsage = "email protection"
+	UsageSMIME             KeyUsage = "s/mime"
+	UsageIPsecEndSystem    KeyUsage = "ipsec end system"
+	UsageIPsecTunnel       KeyUsage = "ipsec tunnel"
+	UsageIPsecUser         KeyUsage = "ipsec user"
+	UsageTimestamping      KeyUsage = "timestamping"
+	UsageOCSPSigning       KeyUsage = "ocsp signing"
+	UsageMicrosoftSGC      KeyUsage = "microsoft sgc"
+	UsageNetscapeSGC       KeyUsage = "netscape sgc"
 )
 
 // DefaultKeyUsages contains the default list of key usages

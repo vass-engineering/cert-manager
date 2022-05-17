@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,13 +26,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	certmanager "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	certmanager "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 )
 
 // dropNotFound ignores the given error if it's a not-found error,
@@ -64,7 +63,7 @@ func OwningCertForSecret(secret *corev1.Secret) *types.NamespacedName {
 type InjectTarget interface {
 	// AsObject returns this injectable as an object.
 	// It should be a pointer suitable for mutation.
-	AsObject() runtime.Object
+	AsObject() client.Object
 
 	// SetCA sets the CA of this target to the given certificate data (in the standard
 	// PEM format used across Kubernetes).  In cases where multiple CA fields exist per
@@ -122,7 +121,7 @@ func splitNamespacedName(nameStr string) types.NamespacedName {
 
 // Reconcile attempts to ensure that a particular object has all the CAs injected that
 // it has requested.
-func (r *genericInjectReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
+func (r *genericInjectReconciler) Reconcile(_ context.Context, req ctrl.Request) (ctrl.Result, error) {
 	ctx := context.Background()
 	log := r.log.WithValues(r.resourceName, req.NamespacedName)
 

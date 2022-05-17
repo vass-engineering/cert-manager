@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,26 +24,27 @@ import (
 	. "github.com/onsi/gomega"
 
 	api "k8s.io/api/core/v1"
-	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextcs "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	kscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	apireg "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1beta1"
+	apireg "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	gwapi "sigs.k8s.io/gateway-api/pkg/client/clientset/gateway/versioned"
 
-	"github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	clientset "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
-	certmgrscheme "github.com/jetstack/cert-manager/pkg/client/clientset/versioned/scheme"
-	"github.com/jetstack/cert-manager/pkg/util/pki"
-	"github.com/jetstack/cert-manager/test/e2e/framework/addon"
-	"github.com/jetstack/cert-manager/test/e2e/framework/config"
-	"github.com/jetstack/cert-manager/test/e2e/framework/helper"
-	"github.com/jetstack/cert-manager/test/e2e/framework/log"
-	"github.com/jetstack/cert-manager/test/e2e/framework/util"
-	"github.com/jetstack/cert-manager/test/e2e/framework/util/errors"
+	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	clientset "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
+	certmgrscheme "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/scheme"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/addon"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/config"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/helper"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/log"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/util"
+	"github.com/cert-manager/cert-manager/test/e2e/framework/util/errors"
 )
 
 // TODO: this really should be done somewhere in cert-manager proper
@@ -71,6 +72,7 @@ type Framework struct {
 
 	// Kubernetes API clientsets
 	KubeClientSet          kubernetes.Interface
+	GWClientSet            gwapi.Interface
 	CertManagerClientSet   clientset.Interface
 	APIExtensionsClientSet apiextcs.Interface
 
@@ -134,6 +136,10 @@ func (f *Framework) BeforeEach() {
 
 	By("Creating a controller-runtime client")
 	f.CRClient, err = crclient.New(kubeConfig, crclient.Options{Scheme: Scheme})
+	Expect(err).NotTo(HaveOccurred())
+
+	By("Creating a gateway-api client")
+	f.GWClientSet, err = gwapi.NewForConfig(kubeConfig)
 	Expect(err).NotTo(HaveOccurred())
 
 	By("Building a namespace api object")

@@ -1,5 +1,5 @@
 /*
-Copyright 2018 The Jetstack cert-manager contributors.
+Copyright 2020 The cert-manager Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,10 +20,10 @@ import (
 	"context"
 	"fmt"
 
-	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
-	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	logf "github.com/jetstack/cert-manager/pkg/logs"
+	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	logf "github.com/cert-manager/cert-manager/pkg/logs"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -32,12 +32,12 @@ func (v *Venafi) Setup(ctx context.Context) (err error) {
 		if err != nil {
 			errorMessage := "Failed to setup Venafi issuer"
 			v.log.Error(err, errorMessage)
-			apiutil.SetIssuerCondition(v.issuer, cmapi.IssuerConditionReady, cmmeta.ConditionFalse, "ErrorSetup", fmt.Sprintf("%s: %v", errorMessage, err))
+			apiutil.SetIssuerCondition(v.issuer, v.issuer.GetGeneration(), cmapi.IssuerConditionReady, cmmeta.ConditionFalse, "ErrorSetup", fmt.Sprintf("%s: %v", errorMessage, err))
 			err = fmt.Errorf("%s: %v", errorMessage, err)
 		}
 	}()
 
-	client, err := v.clientBuilder(v.resourceNamespace, v.secretsLister, v.issuer)
+	client, err := v.clientBuilder(v.resourceNamespace, v.secretsLister, v.issuer, v.Metrics, v.log)
 	if err != nil {
 		return fmt.Errorf("error building client: %v", err)
 	}
@@ -55,7 +55,7 @@ func (v *Venafi) Setup(ctx context.Context) (err error) {
 		v.Recorder.Eventf(v.issuer, corev1.EventTypeNormal, "Ready", "Verified issuer with Venafi server")
 	}
 	v.log.V(logf.DebugLevel).Info("Venafi issuer started")
-	apiutil.SetIssuerCondition(v.issuer, cmapi.IssuerConditionReady, cmmeta.ConditionTrue, "Venafi issuer started", "Venafi issuer started")
+	apiutil.SetIssuerCondition(v.issuer, v.issuer.GetGeneration(), cmapi.IssuerConditionReady, cmmeta.ConditionTrue, "Venafi issuer started", "Venafi issuer started")
 
 	return nil
 }
