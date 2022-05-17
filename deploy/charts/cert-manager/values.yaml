@@ -26,6 +26,26 @@ global:
     # Override the namespace used to store the ConfigMap for leader election
     namespace: "kube-system"
 
+clusterissuerinfra:
+  mail: "felix.centenera@vass.es"
+  privateKeySecretRef: "letsencryptsecretinfraapps"
+  ingressclass: "eks-tyc-ingress-nginx"
+
+clusterissuerapps:
+  mail: "felix.centenera@vass.es"
+  privateKeySecretRef: "letsencryptapps"
+  ingressclass: "eks-tyc-ingress-nginx-apps"
+
+clusterissuerappspre:
+  mail: "felix.centenera@vass.es"
+  privateKeySecretRef: "letsencryptappspre"
+  ingressclass: "eks-tyc-ingress-nginx-apps-pre"
+
+clusterissuerinternal:
+  mail: "felix.centenera@vass.es"
+  privateKeySecretRef: "letsencryptingressinternal"
+  ingressclass: "ingressinternal"    
+
     # The duration that non-leader candidates will wait after observing a
     # leadership renewal until attempting to acquire leadership of a led but
     # unrenewed leader slot. This is effectively the maximum duration that a
@@ -262,10 +282,13 @@ webhook:
   # Path to a file containing a WebhookConfiguration object used to configure the webhook
   # - --config=<path-to-config-file>
 
-  resources: {}
-    # requests:
-    #   cpu: 10m
-    #   memory: 32Mi
+ resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 512Mi
 
   ## Liveness and readiness probe values
   ## Ref: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#container-probes
@@ -394,10 +417,13 @@ cainjector:
   # Enable profiling for cainjector
   # - --enable-profiling=true
 
-  resources: {}
-    # requests:
-    #   cpu: 10m
-    #   memory: 32Mi
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
 
   nodeSelector:
     kubernetes.io/os: linux
@@ -484,10 +510,13 @@ startupapicheck:
   # To see all available flags run docker run quay.io/jetstack/cert-manager-ctl:<version> --help
   extraArgs: []
 
-  resources: {}
-    # requests:
-    #   cpu: 10m
-    #   memory: 32Mi
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
 
   nodeSelector: {}
 
