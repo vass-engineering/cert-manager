@@ -26,6 +26,8 @@ global:
     # Override the namespace used to store the ConfigMap for leader election
     namespace: "kube-system"
 
+installCRDs: true
+
 clusterissuerinfra:
   mail: "felix.centenera@vass.es"
   privateKeySecretRef: "letsencryptsecretinfraapps"
