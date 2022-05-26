@@ -26,6 +26,8 @@ global:
     # Override the namespace used to store the ConfigMap for leader election
     namespace: "kube-system"
 
+installCRDs: true
+
 clusterissuerinfra:
   mail: "felix.centenera@vass.es"
   privateKeySecretRef: "letsencryptsecretinfraapps"
@@ -60,8 +62,6 @@ clusterissuerinternal:
     # The duration the clients should wait between attempting acquisition and
     # renewal of a leadership.
     # retryPeriod: 15s
-
-installCRDs: true
 
 replicaCount: 1
 
