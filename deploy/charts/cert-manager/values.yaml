@@ -26,7 +26,7 @@ global:
     # Override the namespace used to store the ConfigMap for leader election
     namespace: "kube-system"
 
-installCRDs: true
+installCRDs: false
 
 clusterissuerinfra:
   mail: "felix.centenera@vass.es"
